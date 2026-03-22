@@ -1,0 +1,91 @@
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id           String    @id @default(cuid())
+  name         String
+  code         String?   @unique
+  type         String    @default("OTHER") // FUND | STOCK | FIXED | WEALTH | OTHER
+  category     String    @default("权益") // 大类见 src/lib/categories.ts CATEGORY_ORDER
+  subCategory  String?   // 小类，随大类联动，见 categories.ts SUB_BY_CATEGORY
+  account      String?   // 账户：招商银行、交通银行、天天基金等
+  riskLevel    String?   // R1-R5
+  costOverride Decimal?  // 手动覆盖总成本（为空则按流水计算）
+  unitsOverride Decimal? // 手动覆盖份额（为空则按流水计算，便于初次输入）
+  closedAt     DateTime? // 已清仓：总览不展示，流水与净值保留
+  deletedAt    DateTime? // 误建软删：无流水才允许 API 删减
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  transactions   Transaction[]
+  dailyPrices     DailyPrice[]
+  snapshotItems   SnapshotItem[]
+}
+
+// 资产大类目标占比（仅大类有目标%，产品无）
+model CategoryTarget {
+  id                  String   @id @default(cuid())
+  category            String   @unique // 现金 | 债券 | 商品 | 权益
+  targetAllocationPct Decimal
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model Transaction {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  type      String   // BUY | SELL | DIVIDEND
+  date      DateTime
+  quantity  Decimal  @default(0)
+  price     Decimal?
+  amount    Decimal
+  note      String?  @default("")
+  createdAt DateTime @default(now())
+
+  @@index([productId, date])
+}
+
+model DailyPrice {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  date      DateTime
+  price     Decimal
+  createdAt DateTime @default(now())
+
+  @@unique([productId, date])
+  @@index([productId])
+}
+
+model Snapshot {
+  id           String   @id @default(cuid())
+  snapshotDate DateTime
+  createdAt    DateTime @default(now())
+  note         String?  @default("")
+
+  items SnapshotItem[]
+}
+
+model SnapshotItem {
+  id            String   @id @default(cuid())
+  snapshotId    String
+  snapshot      Snapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  productId     String
+  product       Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  units         Decimal
+  unitPrice     Decimal
+  totalValue    Decimal
+  allocationPct Decimal?
+  costBasis     Decimal?
+
+  @@unique([snapshotId, productId])
+  @@index([snapshotId])
+}

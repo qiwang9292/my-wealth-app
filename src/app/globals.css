@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground: #0f172a;
+  --background: #f8fafc;
+  --muted: #64748b;
+  --border: #e2e8f0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --foreground: #f1f5f9;
+    --background: #0f172a;
+    --muted: #94a3b8;
+    --border: #334155;
+  }
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+}
+
+/* 高密度表格：紧凑行高 */
+.table-dense th,
+.table-dense td {
+  @apply px-2 py-1 text-sm;
+}
+
+.table-dense thead th {
+  @apply bg-slate-200 dark:bg-slate-700 font-medium sticky top-0 z-10;
+}
+
+.table-dense tbody tr:nth-child(even) {
+  @apply bg-slate-50 dark:bg-slate-800/50;
+}
+
+.table-dense tbody tr:hover {
+  @apply bg-slate-100 dark:bg-slate-700/70;
+}
+
+.table-dense .num {
+  @apply text-right tabular-nums;
+}
