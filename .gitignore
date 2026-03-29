@@ -41,3 +41,6 @@ prisma/dev.db-journal
 /dev.db-journal
 *.db
 *.db-journal
+
+# 本地导出的瞬间 Excel（可能含敏感数据；保留目录见 瞬间/.gitkeep）
+瞬间/*.xlsx

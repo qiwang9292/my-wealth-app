@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/refresh-prices",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/cron/month-end-snapshot",
+      "schedule": "30 7 * * *"
+    }
+  ]
+}

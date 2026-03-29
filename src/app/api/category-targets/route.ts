@@ -12,6 +12,18 @@ export async function GET() {
   if (list.length === 0) {
     await prisma.categoryTarget.createMany({ data: DEFAULT_CATEGORIES });
     list = await prisma.categoryTarget.findMany({ orderBy: { category: "asc" } });
+  } else {
+    const have = new Set(list.map((r) => r.category));
+    const missing = CATEGORY_ORDER.filter((c) => !have.has(c));
+    if (missing.length) {
+      await prisma.categoryTarget.createMany({
+        data: missing.map((category) => ({
+          category,
+          targetAllocationPct: DEFAULT_TARGET_PCT_BY_CATEGORY[category],
+        })),
+      });
+      list = await prisma.categoryTarget.findMany({ orderBy: { category: "asc" } });
+    }
   }
   return NextResponse.json(list);
 }

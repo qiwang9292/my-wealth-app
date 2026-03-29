@@ -2,6 +2,7 @@
  * 金融数据接口：按产品代码获取基金净值、股票最新价；按名称查基金代码。
  * 基金：天天基金 fundgz / 东方财富搜索
  * 股票：新浪行情 hq.sinajs.cn
+ * 积存金参考价：新浪期货 nf_AU0（上期所黄金连续，元/克），非银行柜台价
  */
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
@@ -14,6 +15,9 @@ const KNOWN_FUND_CODES: Record<string, string> = {
   "易方达品质动能三年持有混合A": "014508",
   "招商鑫利中短债债券C": "006774",
   "天弘中证红利低波100": "008114",
+  "天弘中证红利低波动100联接C": "008115",
+  "天弘中证红利低波100联接C": "008115",
+  "天弘中证红利低波100C": "008115",
   "长盛安逸纯债A": "007744",
   "长盛安逸纯债C": "007745",
   "长盛安逸纯债": "007744",
@@ -122,13 +126,58 @@ export async function lookupCodeByName(name: string): Promise<string | null> {
       if (list.length > 0) break;
     }
     const best = pickBestMatch(name, list);
-    return best?.Code ?? null;
+    if (best?.Code) return best.Code;
+
+    // 备用：用更短关键词再试（东方财富偶发首词无结果）
+    const short = name.replace(/\s/g, "").slice(0, 6);
+    if (short.length >= 4 && short !== keywords[0]) {
+      const list2 = await search(short);
+      const best2 = pickBestMatch(name, list2);
+      if (best2?.Code) return best2.Code;
+    }
+
+    return null;
   } catch {
     return null;
   }
 }
 
-/** 基金：东方财富历史净值接口（备用，支持 QDII/指数型等 fundgz 无数据的基金）；返回为 Markdown 表格 */
+/** 从 F10DataApi.aspx 响应里取出 lsjz 的 content 片段（内嵌 HTML 或管道表） */
+function eastmoneyLsjzContentFromResponse(text: string): string {
+  const contentMatch = text.match(/content\s*:\s*"([\s\S]*?)"\s*,/);
+  const raw = contentMatch ? contentMatch[1] : text;
+  return raw.replace(/\\"/g, '"').replace(/\\n/g, "\n").replace(/\\'/g, "'");
+}
+
+/**
+ * 解析东方财富 lsjz 的 content：旧版为 |日期|净值|；场内 ETF 等（如 159985）为 HTML 表，与
+ * https://fundf10.eastmoney.com/jjjz_${code}.html 同源数据。
+ */
+function parseEastmoneyLsjzRows(content: string): { date: string; price: number }[] {
+  const rows: { date: string; price: number }[] = [];
+  for (const m of content.matchAll(/\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([\d.]+)\s*\|/g)) {
+    const price = parseFloat(m[2]);
+    if (!Number.isNaN(price)) rows.push({ date: m[1], price });
+  }
+  if (rows.length === 0) {
+    for (const m of content.matchAll(/<td>(\d{4}-\d{2}-\d{2})<\/td>\s*<td[^>]*>([\d.]+)<\/td>/gi)) {
+      const price = parseFloat(m[2]);
+      if (!Number.isNaN(price)) rows.push({ date: m[1], price });
+    }
+  }
+  /** 场内 ETF 等：表头行带 class，tbody 为 <tr><td>日期</td><td class='tor bold'>净值</td>… */
+  if (rows.length === 0) {
+    for (const m of content.matchAll(
+      /<tr[^>]*>\s*<td[^>]*>(\d{4}-\d{2}-\d{2})<\/td>\s*<td[^>]*>([\d.]+)<\/td>/gi
+    )) {
+      const price = parseFloat(m[2]);
+      if (!Number.isNaN(price)) rows.push({ date: m[1], price });
+    }
+  }
+  return rows;
+}
+
+/** 基金：东方财富历史净值接口（备用，支持 QDII/指数型、场内 ETF 等 fundgz 无数据的品种） */
 async function fetchFundNetValueEastmoney(code: string): Promise<{ price: number; date?: string } | null> {
   const end = new Date();
   const start = new Date(end);
@@ -137,17 +186,20 @@ async function fetchFundNetValueEastmoney(code: string): Promise<{ price: number
   const edate = end.toISOString().slice(0, 10);
   const url = `https://fundf10.eastmoney.com/F10DataApi.aspx?type=lsjz&code=${code}&page=1&per=5&sdate=${sdate}&edate=${edate}`;
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA, Referer: "https://fund.eastmoney.com/" }, next: { revalidate: 0 } });
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": UA,
+        Referer: `https://fundf10.eastmoney.com/jjjz_${code}.html`,
+      },
+      next: { revalidate: 0 },
+    });
     if (!res.ok) return null;
     const text = await res.text();
-    const contentMatch = text.match(/content\s*:\s*"([\s\S]*?)"\s*,/);
-    const raw = contentMatch ? contentMatch[1] : text;
-    const content = raw.replace(/\\"/g, '"').replace(/\\n/g, "\n");
-    const rowMatch = content.match(/\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([\d.]+)\s*\|/);
-    if (!rowMatch) return null;
-    const price = parseFloat(rowMatch[2]);
-    if (Number.isNaN(price)) return null;
-    return { price, date: rowMatch[1] };
+    const content = eastmoneyLsjzContentFromResponse(text);
+    const rows = parseEastmoneyLsjzRows(content);
+    if (rows.length === 0) return null;
+    const latest = rows.reduce((a, b) => (a.date >= b.date ? a : b));
+    return { price: latest.price, date: latest.date };
   } catch {
     return null;
   }
@@ -162,8 +214,11 @@ export async function fetchFundNetValue(code: string): Promise<{ price: number; 
       const text = await res.text();
       const jsonStr = text.replace(/^jsonpgz\(/, "").replace(/\);?\s*$/, "");
       const data = JSON.parse(jsonStr) as { dwjz?: string; gsz?: string; jzrq?: string; gztime?: string };
-      const priceStr = data.gsz ?? data.dwjz;
-      if (priceStr != null && priceStr !== "") {
+      /** 与银行/代销「持仓市值」口径对齐：优先已披露单位净值 dwjz；gsz 为盘中估算，常与 App 持仓页有偏差 */
+      const dwjzTrim = data.dwjz != null ? String(data.dwjz).trim() : "";
+      const gszTrim = data.gsz != null ? String(data.gsz).trim() : "";
+      const priceStr = dwjzTrim !== "" ? dwjzTrim : gszTrim !== "" ? gszTrim : "";
+      if (priceStr !== "") {
         const price = parseFloat(priceStr);
         if (!Number.isNaN(price)) return { price, date: data.jzrq ?? data.gztime?.slice(0, 10) };
       }
@@ -181,24 +236,136 @@ function stockPrefix(code: string): string {
   return "sz" + code; // 深圳
 }
 
-/** 股票：获取最新价（新浪行情，逗号分隔：名称,今开,昨收,当前价,...） */
+/** 东财 push2 行情 secid：沪 1.xxxxxx、深 0.xxxxxx */
+export function eastMoneySecidForCode(code: string): string | null {
+  const c = code.replace(/\s/g, "");
+  if (!/^\d{6}$/.test(c)) return null;
+  if (/^(60|68)/.test(c)) return `1.${c}`;
+  return `0.${c}`;
+}
+
+/** 腾讯行情前缀（与新浪 stockPrefix 一致：5/6 开头上证，9 北交所等走 sh，其余深证） */
+function tencentMarketPrefix(code: string): string {
+  const c = code.replace(/\s/g, "");
+  if (!/^\d{6}$/.test(c)) return `sz${c}`;
+  const head = c[0];
+  if (head === "5" || head === "6" || c.startsWith("9")) return `sh${c}`;
+  return `sz${c}`;
+}
+
+/** 东财个股/ETF 最新价（新浪失败或乱码时的兜底，如 159985） */
+async function fetchStockPriceEastmoney(code: string): Promise<{ price: number } | null> {
+  const secid = eastMoneySecidForCode(code);
+  if (!secid) return null;
+  const url = `https://push2.eastmoney.com/api/qt/stock/get?invt=2&fltt=2&fields=f43,f58&secid=${secid}&ut=fa5fd1943c7b386f172d6893dbfba10b`;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": UA, Referer: "https://quote.eastmoney.com/" },
+      next: { revalidate: 0 },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { data?: { f43?: number | string } };
+    const raw = json?.data?.f43;
+    if (raw === undefined || raw === null || raw === "") return null;
+    const price = typeof raw === "number" ? raw : parseFloat(String(raw));
+    if (!Number.isFinite(price) || price <= 0) return null;
+    return { price };
+  } catch {
+    return null;
+  }
+}
+
+/** 腾讯 qt.gtimg.cn 最新价兜底 */
+async function fetchStockPriceTencent(code: string): Promise<{ price: number } | null> {
+  const sym = tencentMarketPrefix(code);
+  const url = `https://qt.gtimg.cn/q=${sym}`;
+  try {
+    const res = await fetch(url, { headers: { "User-Agent": UA }, next: { revalidate: 0 } });
+    if (!res.ok) return null;
+    const buf = await res.arrayBuffer();
+    const text = decodeSinaHqBody(buf);
+    const m = text.match(/="([^"]*)"/);
+    if (!m) return null;
+    const parts = m[1].split("~");
+    /** 常见：…~名称~代码~当前价~…，当前价多为第 4 段（下标 3） */
+    for (const idx of [3, 2, 4]) {
+      if (idx >= parts.length) continue;
+      const price = parseFloat(parts[idx]);
+      if (Number.isFinite(price) && price > 0 && price < 1e7) return { price };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A 股/ETF：取 anchor 所在自然月最后一个交易日的收盘价（与基金 fetchFundPriceAtDate 同口径），用于三月/六月盈亏。
+ */
+export async function fetchStockCloseLastInMonth(code: string, anchorDate: Date): Promise<number | null> {
+  const secid = eastMoneySecidForCode(code);
+  if (!secid) return null;
+  const y = anchorDate.getFullYear();
+  const m = anchorDate.getMonth();
+  const beg = `${y}${String(m + 1).padStart(2, "0")}01`;
+  const lastD = new Date(y, m + 1, 0).getDate();
+  const end = `${y}${String(m + 1).padStart(2, "0")}${String(lastD).padStart(2, "0")}`;
+  const path = `api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4&fields2=f51,f52&fqt=1&klt=101&beg=${beg}&end=${end}&lmt=120&ut=fa5fd1943c7b386f172d6893dbfba10b`;
+  const hosts = ["https://push2his.eastmoney.com", "https://24.push2his.eastmoney.com"];
+  for (const h of hosts) {
+    try {
+      const res = await fetch(`${h}/${path}`, {
+        headers: { "User-Agent": UA, Referer: "https://quote.eastmoney.com/" },
+        next: { revalidate: 0 },
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as { data?: { klines?: string[] } };
+      const lines = json?.data?.klines;
+      if (!lines?.length) continue;
+      const last = lines[lines.length - 1];
+      const closeStr = last.split(",")[1];
+      const close = closeStr != null ? parseFloat(closeStr) : NaN;
+      if (!Number.isFinite(close) || close <= 0) continue;
+      return close;
+    } catch {
+      /* try next host */
+    }
+  }
+  return null;
+}
+
+/** 新浪 A 股/ETF 行情为 GBK；用 UTF-8 解码会导致中文乱码甚至字段错位，场内 ETF（如 159985）易解析失败 */
+function decodeSinaHqBody(buf: ArrayBuffer): string {
+  try {
+    return new TextDecoder("gbk").decode(buf);
+  } catch {
+    return new TextDecoder("utf-8").decode(buf);
+  }
+}
+
+/** 股票：获取最新价（新浪 → 东财 → 腾讯；场内 ETF 如 159985 新浪易失败） */
 export async function fetchStockPrice(code: string): Promise<{ price: number } | null> {
   const list = stockPrefix(code);
   const url = `https://hq.sinajs.cn/list=${list}`;
   try {
     const res = await fetch(url, { headers: { "User-Agent": UA, Referer: "https://finance.sina.com.cn/" }, next: { revalidate: 0 } });
-    if (!res.ok) return null;
-    const text = await res.text();
-    const match = text.match(/"([^"]*)"/);
-    if (!match) return null;
-    const parts = match[1].split(",");
-    if (parts.length < 4) return null;
-    const price = parseFloat(parts[3]); // 当前价
-    if (Number.isNaN(price)) return null;
-    return { price };
+    if (res.ok) {
+      const text = decodeSinaHqBody(await res.arrayBuffer());
+      const match = text.match(/"([^"]*)"/);
+      if (match) {
+        const parts = match[1].split(",");
+        if (parts.length >= 4) {
+          const price = parseFloat(parts[3]);
+          if (!Number.isNaN(price) && price > 0) return { price };
+        }
+      }
+    }
   } catch {
-    return null;
+    /* fallthrough */
   }
+  const em = await fetchStockPriceEastmoney(code);
+  if (em) return em;
+  return fetchStockPriceTencent(code);
 }
 
 /** 按类型获取最新价格（FUND / STOCK），其它类型返回 null */
@@ -207,12 +374,54 @@ export async function fetchLatestPrice(
   type: string
 ): Promise<{ price: number; date?: string } | null> {
   const upper = type.toUpperCase();
-  if (upper === "FUND") return fetchFundNetValue(code);
+  if (upper === "FUND") {
+    const f = await fetchFundNetValue(code);
+    if (f) return f;
+    // 场内 ETF（如 159xxx）在 fundgz 偶发无数据时用股票行情兜底
+    const s = await fetchStockPrice(code);
+    return s ? { price: s.price } : null;
+  }
   if (upper === "STOCK") {
-    const r = await fetchStockPrice(code);
-    return r ? { price: r.price } : null;
+    const s = await fetchStockPrice(code);
+    if (s) return { price: s.price };
+    // 六位代码曾被误判为深市股票时，新浪为空但天天基金有净值
+    if (/^\d{6}$/.test(code)) {
+      const f = await fetchFundNetValue(code);
+      if (f) return f;
+    }
+    return null;
   }
   return null;
+}
+
+/**
+ * 银行积存金无稳定公开 JSON。使用新浪财经「黄金连续」nf_AU0（人民币元/克）作持仓参考单价，
+ * 与招行 APP 等买入/赎回参考价可能相差数元，属正常。
+ */
+export async function fetchShfeGoldMainContractYuanPerGram(): Promise<{ price: number } | null> {
+  const url = "https://hq.sinajs.cn/list=nf_AU0";
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": UA, Referer: "https://finance.sina.com.cn/" },
+      next: { revalidate: 0 },
+    });
+    if (!res.ok) return null;
+    const text = await res.text();
+    const m = text.match(/nf_AU0="([^"]*)"/);
+    if (!m?.[1]?.trim()) return null;
+    const parts = m[1].split(",");
+    /** 样本：… , 买一, 卖一, 最新价, … → 取最新价，缺失则用买卖价中间价 */
+    const last = parts.length > 8 ? parseFloat(parts[8]) : NaN;
+    if (Number.isFinite(last) && last > 0) return { price: last };
+    const bid = parts.length > 6 ? parseFloat(parts[6]) : NaN;
+    const ask = parts.length > 7 ? parseFloat(parts[7]) : NaN;
+    if (Number.isFinite(bid) && Number.isFinite(ask) && bid > 0 && ask > 0) {
+      return { price: (bid + ask) / 2 };
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /** 基金：获取指定日期所在月的月末净值（东方财富 F10），用于三月/六月盈亏 */
@@ -223,16 +432,20 @@ export async function fetchFundPriceAtDate(code: string, date: Date): Promise<nu
   const e = edate.toISOString().slice(0, 10);
   const url = `https://fundf10.eastmoney.com/F10DataApi.aspx?type=lsjz&code=${code}&page=1&per=31&sdate=${s}&edate=${e}`;
   try {
-    const res = await fetch(url, { headers: { "User-Agent": UA, Referer: "https://fund.eastmoney.com/" }, next: { revalidate: 0 } });
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": UA,
+        Referer: `https://fundf10.eastmoney.com/jjjz_${code}.html`,
+      },
+      next: { revalidate: 0 },
+    });
     if (!res.ok) return null;
     const text = await res.text();
-    const contentMatch = text.match(/content\s*:\s*"([\s\S]*?)"\s*,/);
-    const raw = contentMatch ? contentMatch[1] : text;
-    const content = raw.replace(/\\"/g, '"').replace(/\\n/g, "\n");
-    const allRows = Array.from(content.matchAll(/\|\s*(\d{4}-\d{2}-\d{2})\s*\|\s*([\d.]+)\s*\|/g));
-    if (allRows.length === 0) return null;
-    const latest = allRows.reduce((a, b) => (a[1] > b[1] ? a : b));
-    return parseFloat(latest[2]) || null;
+    const content = eastmoneyLsjzContentFromResponse(text);
+    const rows = parseEastmoneyLsjzRows(content);
+    if (rows.length === 0) return null;
+    const latest = rows.reduce((a, b) => (a.date >= b.date ? a : b));
+    return latest.price;
   } catch {
     return null;
   }

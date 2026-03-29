@@ -11,9 +11,10 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  /* suppressHydrationWarning：部分浏览器扩展会向 body 注入属性（如 cz-shortcut-listen），避免误报 hydration 不一致 */
   return (
-    <html lang="zh-CN">
-      <body className="antialiased min-h-screen">
+    <html lang="zh-CN" suppressHydrationWarning>
+      <body className="antialiased min-h-screen" suppressHydrationWarning>
         {children}
       </body>
     </html>

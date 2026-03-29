@@ -35,7 +35,7 @@ const EXCEL_ROWS: { account: string; assetType: string; name: string; riskLevel:
   { account: "美元", assetType: "理财", name: "阳光金美元安心计划", riskLevel: "R1", amount: 74550.0 },
 ];
 
-/** 一级：现金（人民币/美元/日元）、债权（纯债/股债混合）、商品、权益（美股/港A） */
+/** 一级：现金、理财、债权、商品、权益（展示顺序见 CATEGORY_ORDER） */
 function inferCategoryAndSub(row: (typeof EXCEL_ROWS)[0]): { category: string; subCategory: string } {
   if (row.account === "美元") {
     return { category: "现金", subCategory: "美元" };

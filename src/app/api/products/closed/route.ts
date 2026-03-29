@@ -12,6 +12,21 @@ export async function GET() {
     include: { transactions: { orderBy: { date: "asc" } } },
   });
 
+  const closedIds = closed.map((p) => p.id);
+  const latestNavByProduct = new Map<string, number>();
+  if (closedIds.length) {
+    const priceRows = await prisma.dailyPrice.findMany({
+      where: { productId: { in: closedIds } },
+      orderBy: { date: "desc" },
+      select: { productId: true, price: true },
+    });
+    for (const r of priceRows) {
+      if (!latestNavByProduct.has(r.productId)) {
+        latestNavByProduct.set(r.productId, Number(r.price));
+      }
+    }
+  }
+
   const rows = closed.map((p) => {
     const txs = p.transactions;
     let totalSellAmount = 0;
@@ -31,9 +46,12 @@ export async function GET() {
       type: t.type,
       quantity: t.quantity,
       amount: t.amount,
+      price: t.price,
       date: t.date,
     }));
-    const realizedPnl = sumLifetimeRealizedPnl(ledgerTxs);
+    const nav = latestNavByProduct.get(p.id);
+    const navImpute = nav != null && Number.isFinite(nav) && nav > 0 ? nav : null;
+    const realizedPnl = sumLifetimeRealizedPnl(ledgerTxs, navImpute);
     return {
       productId: p.id,
       name: p.name,

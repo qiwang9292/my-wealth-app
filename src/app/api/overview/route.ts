@@ -1,9 +1,25 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { CATEGORY_ORDER, isCashCategory } from "@/lib/categories";
+import {
+  CATEGORY_ORDER,
+  isCashCategory,
+  isCashFxSub,
+  isWealthCategory,
+  usesShareTimesNavForCategory,
+} from "@/lib/categories";
+import { marketValueCashForeignBalance } from "@/lib/cash-fx-market-value";
 import { fetchSpotFxCny } from "@/lib/fx-rates";
-import { sumRealizedPnlInMonth } from "@/lib/ledger";
+import {
+  computeLedgerFromTransactions,
+  hasBuyOrSellTransactions,
+  sumDividendAmounts,
+  sumRealizedPnlInMonth,
+} from "@/lib/ledger";
+import { buildDcaProjection } from "@/lib/dca-schedule";
+import { marketValueFromUnitsAndNav } from "@/lib/market-value";
+import { pickMonthBaselineSnapshot } from "@/lib/month-baseline-snapshot";
+import { computeShareNavMonthRowPnl } from "@/lib/sharenav-month-pnl";
 
 export const dynamic = "force-dynamic";
 
@@ -47,18 +63,33 @@ export async function GET() {
 
   const activeProductWhere = { deletedAt: null, closedAt: null };
 
-  const [products, categoryTargets, monthStartSnapshot, allTransactions] = await Promise.all([
+  const [products, categoryTargets, allTransactions, monthStartSnapshot, navStartRows] = await Promise.all([
     prisma.product.findMany({
       where: activeProductWhere,
       orderBy: [{ account: "asc" }, { category: "asc" }, { name: "asc" }],
     }),
     prisma.categoryTarget.findMany(),
-    prisma.snapshot.findFirst({
-      where: { snapshotDate: { gte: firstDay, lt: new Date(year, month, 2) } },
-      include: { items: true },
-    }),
     prisma.transaction.findMany({ orderBy: { date: "asc" } }),
+    pickMonthBaselineSnapshot(prisma, year, month),
+    prisma.$queryRaw<Array<{ productId: string; price: unknown }>>(
+      Prisma.sql`
+        SELECT d1.productId, d1.price
+        FROM DailyPrice d1
+        INNER JOIN (
+          SELECT productId, MAX(date) AS md
+          FROM DailyPrice
+          WHERE date < ${firstDay}
+          GROUP BY productId
+        ) x ON d1.productId = x.productId AND d1.date = x.md
+      `
+    ).catch(() => [] as Array<{ productId: string; price: unknown }>),
   ]);
+
+  const navStartByProduct = new Map<string, number>();
+  for (const r of navStartRows) {
+    const n = Number(String(r.price));
+    if (Number.isFinite(n)) navStartByProduct.set(r.productId, n);
+  }
 
   const txsByProduct = new Map<string, typeof allTransactions>();
   for (const t of allTransactions) {
@@ -106,7 +137,12 @@ export async function GET() {
     }
   }
 
-  const monthRealizedFromSells = sumRealizedPnlInMonth(txsByProduct, year, month);
+  const navByProductForPnl = new Map<string, number>();
+  for (const pid of txsByProduct.keys()) {
+    const n = latestPriceByProduct.get(pid);
+    if (n != null && Number.isFinite(n) && n > 0) navByProductForPnl.set(pid, n);
+  }
+  const monthRealizedFromSells = sumRealizedPnlInMonth(txsByProduct, year, month, navByProductForPnl);
 
   const targetByCategory: Record<string, number> = {};
   categoryTargets.forEach((ct) => {
@@ -143,8 +179,23 @@ export async function GET() {
     costBasis: number;
     costOverride: number | null;
     allocationPct: number;
+    /** 债权/商品/权益：月初参考市值（月初份额×当月1日前最近净值）；其余大类为 null */
     monthStartValue: number | null;
+    /** 债权/商品/权益：本月持仓推算盈亏（元，接口保留） */
     pnl1m: number | null;
+    /** 本月盈亏相对参考基数（月初市值；若无则本月买入）的百分比 */
+    pnl1mPct: number | null;
+    /** 累计现金分红（DIVIDEND 流水金额之和） */
+    totalDividends: number;
+    /** 定投测算（不并入市值；与流水独立） */
+    dca: {
+      periodAmount: number;
+      nextDate: string;
+      frequencyLabel: string;
+      scheduleDetail: string;
+      yearlyOutlay: number;
+      estNextShares: number | null;
+    } | null;
   }[] = [];
 
   let totalValue = 0;
@@ -152,37 +203,46 @@ export async function GET() {
 
   for (const p of products) {
     const txs = txsByProduct.get(p.id) ?? [];
-    let units = 0;
-    let costBasis = 0;
-    for (const t of txs) {
-      const q = Number(t.quantity);
-      const amt = Number(t.amount);
-      if (t.type === "BUY") {
-        units += q;
-        costBasis += amt;
-      } else if (t.type === "SELL") {
-        units -= q;
-        const avgCost = units !== 0 ? costBasis / (units + q) : 0;
-        costBasis -= avgCost * q;
-      }
-    }
+    const rawNav = latestPriceByProduct.get(p.id);
+    const navImputeLedger =
+      rawNav != null && Number.isFinite(rawNav) && rawNav > 0 ? rawNav : null;
+    const { units, costBasis } = computeLedgerFromTransactions(txs, navImputeLedger);
 
     const unitsOverrideRaw = p.unitsOverride != null ? parseFloat(String(p.unitsOverride)) : null;
-    const hasTransactions = txs.length > 0;
+    const ledgerLocked = hasBuyOrSellTransactions(txs);
     const cashFx = isCashCategory(p.category);
-    const displayUnits = cashFx ? 0 : hasTransactions ? units : unitsOverrideRaw ?? units;
+    const shareNav = usesShareTimesNavForCategory(p.category);
+    const displayUnitsRaw = cashFx ? 0 : ledgerLocked ? units : unitsOverrideRaw ?? units;
+    /** 现金/理财：不在总览用「份额×净值」；展示用份额列置 0（避免误用单价×份额） */
+    const displayUnits = shareNav ? displayUnitsRaw : 0;
     const costOverrideRaw = p.costOverride != null ? parseFloat(String(p.costOverride)) : null;
-    const displayCost = hasTransactions ? costBasis : costOverrideRaw ?? costBasis;
+    const displayCost = ledgerLocked ? costBasis : costOverrideRaw ?? costBasis;
 
     const latestPrice = latestPriceByProduct.has(p.id) ? latestPriceByProduct.get(p.id)! : null;
     const monthStartSnap = monthStartByProduct[p.id];
 
+    const subNorm = (p.subCategory ?? "").trim();
+    let fxSpotCny: number | null = null;
+    if (cashFx && subNorm === "美元") fxSpotCny = fxRates.usdCny;
+    else if (cashFx && subNorm === "日元") fxSpotCny = fxRates.jpyCny;
+
     let marketValue = 0;
     if (latestPrice != null) {
       if (cashFx) {
+        if (isCashFxSub(subNorm)) {
+          marketValue = marketValueCashForeignBalance({
+            foreignBalance: latestPrice,
+            fxSpotCnyPerUnit: fxSpotCny,
+            fallbackCostCny: displayCost,
+          });
+        } else {
+          marketValue = latestPrice;
+        }
+      } else if (!shareNav) {
+        /** 理财等：DailyPrice 存的是当日余额/总市值（与「更新净值」一致），非每股单价 */
         marketValue = latestPrice;
       } else if (displayUnits > 0) {
-        marketValue = displayUnits * latestPrice;
+        marketValue = marketValueFromUnitsAndNav(displayUnits, latestPrice);
       } else if (p.type !== "FUND" && p.type !== "STOCK") {
         marketValue = latestPrice;
       } else if (p.type === "FUND") {
@@ -190,18 +250,67 @@ export async function GET() {
       } else {
         marketValue = monthStartSnap ?? 0;
       }
+    } else if (isWealthCategory(p.category)) {
+      /** 尚无 DailyPrice 时：用总成本或月初快照占位，避免理财行市值恒为 0、大类像「没有持仓」 */
+      if (displayCost > 0) marketValue = displayCost;
+      else if (monthStartSnap != null && monthStartSnap > 0) marketValue = monthStartSnap;
+    } else if (cashFx && displayCost > 0) {
+      /** 现金：市值本应由「更新净值」/导入写入 DailyPrice（余额）；仅填总成本未录余额时，用成本占位便于总览与合计 */
+      marketValue = displayCost;
     }
     totalValue += marketValue;
 
     const rw = p.riskLevel ? RISK_WEIGHT[p.riskLevel] ?? 3 : 3;
     riskWeightedSum += marketValue * rw;
-    const monthStartValue = monthStartByProduct[p.id] ?? null;
-    const pnl1m = monthStartValue != null ? marketValue - monthStartValue : null;
 
-    const subNorm = (p.subCategory ?? "").trim();
-    let fxSpotCny: number | null = null;
-    if (cashFx && subNorm === "美元") fxSpotCny = fxRates.usdCny;
-    else if (cashFx && subNorm === "日元") fxSpotCny = fxRates.jpyCny;
+    let monthStartValue: number | null = null;
+    let pnl1m: number | null = null;
+    let pnl1mPct: number | null = null;
+    if (shareNav) {
+      const nav0 = navStartByProduct.get(p.id) ?? null;
+      const mtm = computeShareNavMonthRowPnl({
+        marketValue,
+        txs,
+        ledgerLocked,
+        unitsOverride: unitsOverrideRaw,
+        navAtMonthStart: nav0,
+        navImputeForLedger: navImputeLedger,
+        monthStart: firstDay,
+        now,
+      });
+      monthStartValue = mtm.v0;
+      pnl1m = mtm.pnl1m;
+      if (mtm.pnl1m != null && Number.isFinite(mtm.pnl1m)) {
+        const basis =
+          mtm.v0 != null && mtm.v0 > 0
+            ? mtm.v0
+            : mtm.buyInMonth > 0
+              ? mtm.buyInMonth
+              : null;
+        if (basis != null && basis > 0) {
+          pnl1mPct = new Prisma.Decimal(String(mtm.pnl1m))
+            .div(String(basis))
+            .mul(100)
+            .toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+            .toNumber();
+        }
+      }
+    }
+
+    const dca = buildDcaProjection(
+      {
+        dcaEnabled: p.dcaEnabled,
+        dcaAmount: p.dcaAmount,
+        dcaFrequency: p.dcaFrequency,
+        dcaDayOfMonth: p.dcaDayOfMonth,
+        dcaWeekday: p.dcaWeekday,
+        dcaAnchorDate: p.dcaAnchorDate,
+      },
+      shareNav ? latestPrice : null,
+      now
+    );
+
+    const totalDividends = sumDividendAmounts(txs);
 
     rows.push({
       productId: p.id,
@@ -213,18 +322,21 @@ export async function GET() {
       account: p.account,
       riskLevel: p.riskLevel,
       units: displayUnits,
-      unitsOverride: cashFx ? null : hasTransactions ? null : unitsOverrideRaw,
-      hasTransactions,
-      ledgerLocked: hasTransactions,
+      unitsOverride: cashFx || !shareNav ? null : ledgerLocked ? null : unitsOverrideRaw,
+      hasTransactions: ledgerLocked,
+      ledgerLocked,
       latestPrice,
       fxSpotCny,
       latestPriceDate: latestPriceDateByProduct.get(p.id) ?? null,
       marketValue,
       costBasis: displayCost,
-      costOverride: hasTransactions ? null : costOverrideRaw,
+      costOverride: ledgerLocked ? null : costOverrideRaw,
       allocationPct: 0,
       monthStartValue,
       pnl1m,
+      pnl1mPct,
+      totalDividends,
+      dca,
     });
   }
 
@@ -257,13 +369,27 @@ export async function GET() {
       totalValue > 0 ? (categorySums[cat].value / totalValue) * 100 : 0;
   });
 
-  const monthStartTotal = monthStartSnapshot?.items?.length
-    ? monthStartSnapshot.items.reduce((s, i) => s + Number(i.totalValue), 0)
-    : null;
-  const monthPnL = monthStartTotal != null ? totalValue - monthStartTotal : null;
+  /** 仅债/商/权：合计月初参考市值（份额×月初净值）与本月推算盈亏 */
+  let monthStartTotal = 0;
+  let monthPnLSum = 0;
+  let anyMonthStartV0 = false;
+  let monthPnlNonNullCount = 0;
+  for (const r of withAllocation) {
+    if (!usesShareTimesNavForCategory(r.category)) continue;
+    if (r.monthStartValue != null) {
+      monthStartTotal += r.monthStartValue;
+      anyMonthStartV0 = true;
+    }
+    if (r.pnl1m != null) {
+      monthPnLSum += r.pnl1m;
+      monthPnlNonNullCount += 1;
+    }
+  }
+  const monthPnL = monthPnlNonNullCount > 0 ? monthPnLSum : null;
+  const monthStartTotalOut = anyMonthStartV0 ? monthStartTotal : null;
   const monthPct =
-    monthStartTotal != null && monthStartTotal > 0 && monthPnL != null
-      ? (monthPnL / monthStartTotal) * 100
+    monthStartTotalOut != null && monthStartTotalOut > 0 && monthPnL != null
+      ? (monthPnL / monthStartTotalOut) * 100
       : null;
 
   const overallRisk =
@@ -279,7 +405,7 @@ export async function GET() {
 
   return NextResponse.json({
     totalValue,
-    monthStartTotal,
+    monthStartTotal: monthStartTotalOut,
     monthPnL,
     monthPct,
     monthRealizedPnl: monthRealizedFromSells,
