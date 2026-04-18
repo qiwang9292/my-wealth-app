@@ -60,6 +60,7 @@ export async function PATCH(
     dcaDayOfMonth?: number | null;
     dcaWeekday?: number | null;
     dcaAnchorDate?: Date | null;
+    dcaMaterializedThroughYmd?: string | null;
   } = {};
   /** 已校验；undefined 表示本次未改分红方式 */
   let dividendMethodToSync: string | null | undefined = undefined;
@@ -153,6 +154,7 @@ export async function PATCH(
       data.dcaDayOfMonth = null;
       data.dcaWeekday = null;
       data.dcaAnchorDate = null;
+      data.dcaMaterializedThroughYmd = null;
     } else {
       const rawAmt = body.dcaAmount;
       const nAmt = rawAmt == null || rawAmt === "" ? NaN : Number(rawAmt);
@@ -232,22 +234,6 @@ export async function PATCH(
       },
       { status: 400 }
     );
-  }
-
-  const touchingPosition = costOverride !== undefined || unitsOverride !== undefined;
-  if (touchingPosition) {
-    const buySellCount = await prisma.transaction.count({
-      where: { productId: id, type: { in: ["BUY", "SELL"] } },
-    });
-    if (buySellCount > 0) {
-      return NextResponse.json(
-        {
-          message:
-            "该产品已有买入/卖出流水，份额与成本由流水自动汇总，不能手改。仅分红流水时可继续用手填覆盖；持仓请通过买入/卖出调整。",
-        },
-        { status: 400 }
-      );
-    }
   }
 
   let product;

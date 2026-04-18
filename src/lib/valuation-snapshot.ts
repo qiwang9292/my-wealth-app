@@ -4,9 +4,13 @@
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { marketValueCashForeignBalance } from "@/lib/cash-fx-market-value";
-import { isCashCategory, isCashFxSub, isWealthCategory } from "@/lib/categories";
+import { isCashCategory, isCashFxSub, isWealthCategory, usesShareTimesNavForCategory } from "@/lib/categories";
 import { fetchSpotFxCny, type FxSpotCny } from "@/lib/fx-rates";
-import { computeLedgerFromTransactions, hasBuyOrSellTransactions } from "@/lib/ledger";
+import {
+  computeLedgerFromTransactions,
+  hasBuyOrSellTransactions,
+  ledgerMigrationOpening,
+} from "@/lib/ledger";
 import { pickMonthBaselineSnapshot } from "@/lib/month-baseline-snapshot";
 import { marketValueFromUnitsAndNav } from "@/lib/market-value";
 import { writeSnapshotExcelToFolder } from "@/lib/snapshot-excel-file";
@@ -123,16 +127,21 @@ export async function buildSnapshotLineItems(
     const rawNav = latestPriceByProduct.get(p.id);
     const navImpute =
       rawNav != null && Number.isFinite(rawNav) && rawNav > 0 ? rawNav : null;
-    const { units, costBasis } = computeLedgerFromTransactions(txs, navImpute);
-
     const unitsOverrideRaw = p.unitsOverride != null ? parseFloat(String(p.unitsOverride)) : null;
     const ledgerLocked = hasBuyOrSellTransactions(txs);
-    const cashFx = isCashCategory(p.category);
-    const displayUnits = cashFx ? 0 : ledgerLocked ? units : unitsOverrideRaw ?? units;
     const costOverrideRaw = p.costOverride != null ? parseFloat(String(p.costOverride)) : null;
+    const migrationOpen = ledgerMigrationOpening(ledgerLocked, unitsOverrideRaw, costOverrideRaw);
+    const { units, costBasis } = computeLedgerFromTransactions(txs, navImpute, migrationOpen);
+    const cashFx = isCashCategory(p.category);
+    const shareNav = usesShareTimesNavForCategory(p.category);
+    const displayUnits = cashFx ? 0 : ledgerLocked ? units : unitsOverrideRaw ?? units;
     const displayCost = ledgerLocked ? costBasis : costOverrideRaw ?? costBasis;
 
-    const latestPrice = latestPriceByProduct.has(p.id) ? latestPriceByProduct.get(p.id)! : null;
+    const rawLatestPrice = latestPriceByProduct.has(p.id) ? latestPriceByProduct.get(p.id)! : null;
+    const latestPrice =
+      rawLatestPrice != null && Number.isFinite(rawLatestPrice) && rawLatestPrice > 0
+        ? rawLatestPrice
+        : null;
     const monthStartSnap = monthStartByProduct[p.id];
 
     const subNorm = (p.subCategory ?? "").trim();
@@ -166,6 +175,9 @@ export async function buildSnapshotLineItems(
       else if (monthStartSnap != null && monthStartSnap > 0) marketValue = monthStartSnap;
     } else if (cashFx && displayCost > 0) {
       marketValue = displayCost;
+    } else if (shareNav && displayCost > 0) {
+      if (displayUnits !== 0) marketValue = displayCost;
+      else if (monthStartSnap != null && monthStartSnap > 0) marketValue = monthStartSnap;
     }
 
     totalValue += marketValue;

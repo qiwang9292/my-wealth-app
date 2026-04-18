@@ -6,7 +6,7 @@ import Link from "next/link";
 type SnapshotItem = {
   productId: string;
   totalValue: number;
-  product: { name: string };
+  product: { name: string; account?: string | null };
 };
 
 type Snapshot = {
@@ -35,8 +35,9 @@ export default function SnapshotsComparePage() {
       .then((list) => {
         setSnapshots(Array.isArray(list) ? list : []);
         if (Array.isArray(list) && list.length >= 2 && !idA && !idB) {
-          setIdA(list[0].id);
-          setIdB(list[1].id);
+          // snapshots 按日期倒序：list[0] 新、list[1] 旧；默认旧=A，新=B
+          setIdA(list[1].id);
+          setIdB(list[0].id);
         } else if (Array.isArray(list) && list.length >= 1 && !idA) {
           setIdA(list[0].id);
         }
@@ -53,20 +54,34 @@ export default function SnapshotsComparePage() {
 
   const byProduct = new Map<
     string,
-    { name: string; valueA: number; valueB: number }
+    { name: string; account: string; valueA: number; valueB: number }
   >();
   productIds.forEach((pid) => {
     const itemA = snapA?.items.find((i) => i.productId === pid);
     const itemB = snapB?.items.find((i) => i.productId === pid);
     const name = itemA?.product?.name ?? itemB?.product?.name ?? "—";
+    const account = (itemA?.product?.account ?? itemB?.product?.account ?? "").trim() || "未分配账户";
     const valueA = itemA ? Number(itemA.totalValue) : 0;
     const valueB = itemB ? Number(itemB.totalValue) : 0;
-    byProduct.set(pid, { name, valueA, valueB });
+    byProduct.set(pid, { name, account, valueA, valueB });
   });
 
   const rows = Array.from(byProduct.entries())
     .map(([pid, d]) => ({ productId: pid, ...d }))
     .sort((a, b) => b.valueA + b.valueB - (a.valueA + a.valueB));
+
+  const accountGroups = new Map<string, typeof rows>();
+  for (const r of rows) {
+    const list = accountGroups.get(r.account);
+    if (list) list.push(r);
+    else accountGroups.set(r.account, [r]);
+  }
+  const groupedRows = Array.from(accountGroups.entries())
+    .map(([account, list]) => ({
+      account,
+      rows: list.sort((a, b) => b.valueA + b.valueB - (a.valueA + a.valueB)),
+    }))
+    .sort((a, b) => a.account.localeCompare(b.account, "zh-CN"));
 
   const totalA = snapA ? snapA.items.reduce((s, i) => s + Number(i.totalValue), 0) : 0;
   const totalB = snapB ? snapB.items.reduce((s, i) => s + Number(i.totalValue), 0) : 0;
@@ -133,6 +148,7 @@ export default function SnapshotsComparePage() {
             <table className="w-full border-collapse text-sm">
               <thead className="bg-slate-100 dark:bg-slate-800 sticky top-0">
                 <tr>
+                  <th className="text-left py-2 px-2 border-b border-slate-200 dark:border-slate-600">账户</th>
                   <th className="text-left py-2 px-2 border-b border-slate-200 dark:border-slate-600">产品</th>
                   <th className="text-right py-2 px-2 border-b border-slate-200 dark:border-slate-600">瞬间 A 市值</th>
                   <th className="text-right py-2 px-2 border-b border-slate-200 dark:border-slate-600">瞬间 B 市值</th>
@@ -140,20 +156,38 @@ export default function SnapshotsComparePage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => {
-                  const d = r.valueB - r.valueA;
-                  return (
-                    <tr key={r.productId} className="border-b border-slate-100 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                      <td className="py-1.5 px-2">{r.name}</td>
-                      <td className="py-1.5 px-2 text-right tabular-nums">¥ {fmtNum(r.valueA)}</td>
-                      <td className="py-1.5 px-2 text-right tabular-nums">¥ {fmtNum(r.valueB)}</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${d >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
-                        {d >= 0 ? "+" : ""}¥ {fmtNum(d)}
-                      </td>
-                    </tr>
-                  );
+                {groupedRows.flatMap((g) => {
+                  const subA = g.rows.reduce((s, r) => s + r.valueA, 0);
+                  const subB = g.rows.reduce((s, r) => s + r.valueB, 0);
+                  const subD = subB - subA;
+                  return [
+                      <tr key={`grp-${g.account}-head`} className="bg-slate-50 dark:bg-slate-800/70 font-medium">
+                        <td className="py-1.5 px-2">{g.account}</td>
+                        <td className="py-1.5 px-2">小计</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">¥ {fmtNum(subA)}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">¥ {fmtNum(subB)}</td>
+                        <td className={`py-1.5 px-2 text-right tabular-nums ${subD >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                          {subD >= 0 ? "+" : ""}¥ {fmtNum(subD)}
+                        </td>
+                      </tr>,
+                      ...g.rows.map((r) => {
+                        const d = r.valueB - r.valueA;
+                        return (
+                          <tr key={r.productId} className="border-b border-slate-100 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                            <td className="py-1.5 px-2 text-slate-500 dark:text-slate-400">↳</td>
+                            <td className="py-1.5 px-2">{r.name}</td>
+                            <td className="py-1.5 px-2 text-right tabular-nums">¥ {fmtNum(r.valueA)}</td>
+                            <td className="py-1.5 px-2 text-right tabular-nums">¥ {fmtNum(r.valueB)}</td>
+                            <td className={`py-1.5 px-2 text-right tabular-nums ${d >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}>
+                              {d >= 0 ? "+" : ""}¥ {fmtNum(d)}
+                            </td>
+                          </tr>
+                        );
+                      }),
+                    ];
                 })}
                 <tr className="bg-slate-50 dark:bg-slate-800/80 font-medium">
+                  <td className="py-2 px-2">全部</td>
                   <td className="py-2 px-2">合计</td>
                   <td className="py-2 px-2 text-right tabular-nums">¥ {fmtNum(totalA)}</td>
                   <td className="py-2 px-2 text-right tabular-nums">¥ {fmtNum(totalB)}</td>

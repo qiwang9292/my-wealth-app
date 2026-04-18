@@ -15,7 +15,10 @@ import {
   isWealthCategory,
   usesShareTimesNavForCategory,
 } from "@/lib/categories";
+import { DatePickerField } from "@/components/DatePickerField";
+import { AddTransactionModal } from "@/components/AddTransactionModal";
 import { isJicunGoldProductName } from "@/lib/jicun-gold";
+import { inferProductType } from "@/lib/infer-product-type";
 
 type CategoryType = (typeof CATEGORY_ORDER)[number];
 
@@ -54,6 +57,8 @@ type Row = {
   pnl6mPct?: number | null;
   /** 累计现金分红（分红流水金额合计） */
   totalDividends?: number;
+  /** 自然月内本产品卖出实现+分红（元） */
+  monthRealizedPnl?: number;
   /** 定投测算（不计入市值） */
   dca?: {
     periodAmount: number;
@@ -81,6 +86,35 @@ type Overview = {
   products: Row[];
 };
 
+type CategoryScenario = {
+  name: string;
+  allocationRange: string;
+  annualReturnRangeNote: string;
+  reasoning: string;
+  fitFor: string;
+  riskPoint: string;
+  suggestedWeights?: Record<string, number>;
+  whyThisForYou?: string;
+  decisionAngles?: string[];
+  adjustments?: string[];
+  impact?: string;
+  confidence?: string;
+};
+
+type CategoryScenarioResult = {
+  ok: boolean;
+  warning?: string;
+  effectiveCategories?: string[];
+  normalizedWeights?: Record<string, number>;
+  summary?: string;
+  scenarios?: CategoryScenario[];
+  volatilityWarning?: string;
+  disclaimer?: string;
+  generatedAt?: string;
+  fallback?: boolean;
+  message?: string;
+};
+
 const EMPTY_OVERVIEW: Overview = {
   totalValue: 0,
   monthStartTotal: null,
@@ -94,6 +128,8 @@ const EMPTY_OVERVIEW: Overview = {
 };
 
 const FETCH_TIMEOUT_MS = 15000;
+
+const RISK_WEIGHT_SUMMARY: Record<string, number> = { R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 };
 
 /** 表格/金额展示用；接口或乐观更新偶发 null 时避免整页崩溃 */
 function fmtNum(n: number | null | undefined) {
@@ -110,6 +146,12 @@ function fmtUnitNav(n: number | null | undefined) {
 }
 function fmtPct(n: number) {
   return n.toFixed(1) + "%";
+}
+
+function pct1(n: number | null | undefined): string {
+  const v = n == null ? NaN : Number(n);
+  if (!Number.isFinite(v)) return "0.0%";
+  return `${v.toFixed(1)}%`;
 }
 
 /** 美元/日元即期兑 CNY 展示（日元 1JPY 数值较小，多保留小数） */
@@ -178,7 +220,20 @@ function overrideSnapshotEquals(a: number | null, b: number | null | undefined) 
   return x === y;
 }
 
-type TableDraftRow = { unitsStr?: string; costStr?: string; foreignBalanceStr?: string };
+/** 现金·人民币 / 理财：份额列编辑余额或总市值（元），保存走 POST /api/prices */
+function isCashCnyOrWealthBalanceRow(row: Row): boolean {
+  return (
+    (isCashCategory(row.category) && isCashCnySub(row.subCategory)) || isWealthCategory(row.category)
+  );
+}
+
+type TableDraftRow = {
+  unitsStr?: string;
+  costStr?: string;
+  foreignBalanceStr?: string;
+  /** 现金人民币、理财：与 latestPrice（DailyPrice）对齐 */
+  priceBalanceStr?: string;
+};
 
 function isProductDraftDirty(row: Row, d: TableDraftRow | undefined): boolean {
   if (!d) return false;
@@ -187,13 +242,17 @@ function isProductDraftDirty(row: Row, d: TableDraftRow | undefined): boolean {
     if (p === "invalid") return true;
     if (!overrideSnapshotEquals(p, row.latestPrice ?? null)) return true;
   }
-  if (row.ledgerLocked) return false;
+  if (isCashCnyOrWealthBalanceRow(row) && d.priceBalanceStr !== undefined) {
+    const p = parseOverrideForPatch(d.priceBalanceStr);
+    if (p === "invalid") return true;
+    if (!overrideSnapshotEquals(p, row.latestPrice ?? null)) return true;
+  }
   if (d.unitsStr !== undefined) {
     const p = parseOverrideForPatch(d.unitsStr);
     if (p === "invalid") return true;
     if (!overrideSnapshotEquals(p, row.unitsOverride ?? null)) return true;
   }
-  if (d.costStr !== undefined) {
+  if (d.costStr !== undefined && !isCashCnyOrWealthBalanceRow(row)) {
     const p = parseOverrideForPatch(d.costStr);
     if (p === "invalid") return true;
     if (!overrideSnapshotEquals(p, row.costOverride ?? null)) return true;
@@ -391,6 +450,7 @@ function HomeInner() {
       account?: string | null;
       category?: string;
       subCategory?: string | null;
+      type?: string;
     }[]
   >([]);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -398,6 +458,22 @@ function HomeInner() {
   const [tableSaving, setTableSaving] = useState(false);
   const [tableSaveError, setTableSaveError] = useState<string | null>(null);
   const [leaveNavHref, setLeaveNavHref] = useState<string | null>(null);
+  const [scenarioRisk, setScenarioRisk] = useState<"conservative" | "balanced" | "aggressive">("balanced");
+  const [scenarioHorizon, setScenarioHorizon] = useState<"<1y" | "1-3y" | "3-5y" | "5y+">("3-5y");
+  const [scenarioLoading, setScenarioLoading] = useState(false);
+  const [scenarioError, setScenarioError] = useState<string | null>(null);
+  const [scenarioResult, setScenarioResult] = useState<CategoryScenarioResult | null>(null);
+  const [scenarioExpanded, setScenarioExpanded] = useState(false);
+  const [selectedCategoryNames, setSelectedCategoryNames] = useState<string[]>([]);
+  const [showCategoryScenarioModal, setShowCategoryScenarioModal] = useState(false);
+  const [showAiJudgmentModal, setShowAiJudgmentModal] = useState(false);
+  const [aiJudgmentLoading, setAiJudgmentLoading] = useState(false);
+  const [aiJudgmentError, setAiJudgmentError] = useState<string | null>(null);
+  const [aiJudgmentSnap, setAiJudgmentSnap] = useState<{
+    summary?: string;
+    volatilityWarning?: string;
+    disclaimer?: string;
+  } | null>(null);
 
   useEffect(() => {
     const a = searchParams.get("account")?.trim();
@@ -515,7 +591,8 @@ function HomeInner() {
       const row = next[productId] ? { ...next[productId] } : {};
       if (value === undefined) delete row.unitsStr;
       else row.unitsStr = value;
-      if (!row.unitsStr && !row.costStr && !row.foreignBalanceStr) delete next[productId];
+      if (!row.unitsStr && !row.costStr && !row.foreignBalanceStr && !row.priceBalanceStr)
+        delete next[productId];
       else next[productId] = row;
       return next;
     });
@@ -527,7 +604,8 @@ function HomeInner() {
       const row = next[productId] ? { ...next[productId] } : {};
       if (value === undefined) delete row.costStr;
       else row.costStr = value;
-      if (!row.unitsStr && !row.costStr && !row.foreignBalanceStr) delete next[productId];
+      if (!row.unitsStr && !row.costStr && !row.foreignBalanceStr && !row.priceBalanceStr)
+        delete next[productId];
       else next[productId] = row;
       return next;
     });
@@ -539,7 +617,21 @@ function HomeInner() {
       const row = next[productId] ? { ...next[productId] } : {};
       if (value === undefined) delete row.foreignBalanceStr;
       else row.foreignBalanceStr = value;
-      if (!row.unitsStr && !row.costStr && !row.foreignBalanceStr) delete next[productId];
+      if (!row.unitsStr && !row.costStr && !row.foreignBalanceStr && !row.priceBalanceStr)
+        delete next[productId];
+      else next[productId] = row;
+      return next;
+    });
+  }, []);
+
+  const commitPriceBalanceDraft = useCallback((productId: string, value: string | undefined) => {
+    setTableDrafts((prev) => {
+      const next = { ...prev };
+      const row = next[productId] ? { ...next[productId] } : {};
+      if (value === undefined) delete row.priceBalanceStr;
+      else row.priceBalanceStr = value;
+      if (!row.unitsStr && !row.costStr && !row.foreignBalanceStr && !row.priceBalanceStr)
+        delete next[productId];
       else next[productId] = row;
       return next;
     });
@@ -582,7 +674,44 @@ function HomeInner() {
           }
         }
 
-        if (row.ledgerLocked) continue;
+        if (
+          isCashCnyOrWealthBalanceRow(row) &&
+          d.priceBalanceStr !== undefined &&
+          isForeignBalanceDraftPending(d.priceBalanceStr, row.latestPrice ?? null)
+        ) {
+          const p = parseOverrideForPatch(d.priceBalanceStr);
+          if (p === "invalid") {
+            setTableSaveError("某行人民币余额或理财估值格式不正确，请修正后再保存。");
+            return false;
+          }
+          if (p == null || p < 0 || !Number.isFinite(p)) {
+            setTableSaveError("人民币余额与理财估值须为非负数字，不能为空。");
+            return false;
+          }
+          const res = await fetch("/api/prices", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ productId, price: p }),
+          });
+          const pdata = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            setTableSaveError(
+              typeof pdata?.message === "string" ? pdata.message : `余额/估值保存失败（${res.status}）`
+            );
+            return false;
+          }
+        }
+
+        const migrationSave =
+          row.ledgerLocked && usesShareTimesNavForCategory(row.category);
+        if (
+          row.ledgerLocked &&
+          !migrationSave &&
+          !isCashCategory(row.category) &&
+          !isWealthCategory(row.category)
+        ) {
+          continue;
+        }
         if (!isProductDraftDirty(row, d)) continue;
         const body: Record<string, unknown> = {};
         if (d.unitsStr !== undefined) {
@@ -593,7 +722,7 @@ function HomeInner() {
           }
           if (!overrideSnapshotEquals(p, row.unitsOverride ?? null)) body.unitsOverride = p;
         }
-        if (d.costStr !== undefined) {
+        if (d.costStr !== undefined && !isCashCnyOrWealthBalanceRow(row)) {
           const p = parseOverrideForPatch(d.costStr);
           if (p === "invalid") {
             setTableSaveError("某行总成本数字格式不正确，请修正后再保存。");
@@ -655,10 +784,8 @@ function HomeInner() {
   const categoryList = Array.isArray(overview.categoryList) ? overview.categoryList : [];
   const monthPct =
     overview.monthPct != null && Number.isFinite(Number(overview.monthPct)) ? Number(overview.monthPct) : null;
-  const monthRealizedPnl =
-    overview.monthRealizedPnl != null && Number.isFinite(Number(overview.monthRealizedPnl))
-      ? Number(overview.monthRealizedPnl)
-      : null;
+  const monthPnLTotal =
+    overview.monthPnL != null && Number.isFinite(Number(overview.monthPnL)) ? Number(overview.monthPnL) : null;
   const fxSpotAsOfDate = typeof overview.fxSpotAsOfDate === "string" ? overview.fxSpotAsOfDate : null;
   const navRateStamp = useMemo(() => {
     const ds = new Set<string>();
@@ -731,6 +858,204 @@ function HomeInner() {
     }
     return out;
   }, [accountFilter, categoryList, tableCategoryGroups]);
+
+  useEffect(() => {
+    const names = displayCategoryList.map((c) => c.name).filter(Boolean);
+    setSelectedCategoryNames((prev) => {
+      if (names.length === 0) return [];
+      if (prev.length === 0) return names;
+      const valid = prev.filter((x) => names.includes(x));
+      return valid.length > 0 ? valid : names;
+    });
+  }, [displayCategoryList]);
+
+  const interactiveCategoryList = useMemo((): CategoryRow[] => {
+    if (displayCategoryList.length === 0) return [];
+    const selectedSet = new Set(selectedCategoryNames);
+    const effective = displayCategoryList.filter((c) => selectedSet.has(c.name));
+    if (effective.length === 0) return displayCategoryList;
+    const totalCurrent = effective.reduce((s, c) => s + (Number.isFinite(Number(c.currentPct)) ? Number(c.currentPct) : 0), 0);
+    const totalTarget = effective.reduce((s, c) => s + (Number.isFinite(Number(c.targetPct)) ? Number(c.targetPct) : 0), 0);
+    return displayCategoryList.map((c) => {
+      if (!selectedSet.has(c.name)) return c;
+      const cur = Number.isFinite(Number(c.currentPct)) ? Number(c.currentPct) : 0;
+      const tgt = Number.isFinite(Number(c.targetPct)) ? Number(c.targetPct) : 0;
+      return {
+        ...c,
+        currentPct: totalCurrent > 0 ? (cur / totalCurrent) * 100 : 0,
+        targetPct: totalTarget > 0 ? (tgt / totalTarget) * 100 : 0,
+      };
+    });
+  }, [displayCategoryList, selectedCategoryNames]);
+
+  /** 底部「各大类占比」点选后：资产总结的总资产 / 本月盈亏% / 本月盈亏金额 / 整体风险与选中大类对齐（与表格合计列仍按账户筛序一致） */
+  const assetSummaryScope = useMemo(() => {
+    const allSet = new Set(displayCategoryList.map((c) => c.name));
+    const selSet = new Set(selectedCategoryNames);
+    const categorySubsetActive =
+      allSet.size > 0 &&
+      (selSet.size !== allSet.size || ![...allSet].every((n) => selSet.has(n)));
+
+    const scopedRows = categorySubsetActive
+      ? rows.filter((r) => selSet.has(r.category))
+      : rows;
+
+    const totalMv = scopedRows.reduce(
+      (s, r) => s + (Number.isFinite(Number(r.marketValue)) ? Number(r.marketValue) : 0),
+      0
+    );
+
+    let monthStartTotal = 0;
+    let monthPnLSum = 0;
+    let anyMonthStart = false;
+    let pnlNonNull = 0;
+    for (const r of scopedRows) {
+      if (!usesShareTimesNavForCategory(r.category)) continue;
+      if (r.monthStartValue != null) {
+        monthStartTotal += r.monthStartValue;
+        anyMonthStart = true;
+      }
+      if (r.pnl1m != null) {
+        monthPnLSum += r.pnl1m;
+        pnlNonNull += 1;
+      }
+    }
+    const monthPnL = pnlNonNull > 0 ? monthPnLSum : null;
+    const monthStartOut = anyMonthStart ? monthStartTotal : null;
+    const monthPctScoped =
+      monthStartOut != null && monthStartOut > 0 && monthPnL != null
+        ? (monthPnL / monthStartOut) * 100
+        : null;
+
+    let riskWeighted = 0;
+    for (const r of scopedRows) {
+      const mv = Number.isFinite(Number(r.marketValue)) ? Number(r.marketValue) : 0;
+      const rw = r.riskLevel ? RISK_WEIGHT_SUMMARY[r.riskLevel] ?? 3 : 3;
+      riskWeighted += mv * rw;
+    }
+    const overallRiskScoped = totalMv > 0 ? Math.round((riskWeighted / totalMv) * 10) / 10 : null;
+
+    if (!categorySubsetActive) {
+      return {
+        categorySubsetActive: false,
+        displayTotal,
+        monthPct,
+        monthPnLYuan: monthPnLTotal,
+        overallRisk,
+      };
+    }
+
+    return {
+      categorySubsetActive: true,
+      displayTotal: totalMv,
+      monthPct: monthPctScoped,
+      monthPnLYuan: monthPnL,
+      overallRisk: overallRiskScoped,
+    };
+  }, [
+    displayCategoryList,
+    selectedCategoryNames,
+    rows,
+    displayTotal,
+    monthPct,
+    monthPnLTotal,
+    overallRisk,
+  ]);
+
+  const toggleCategorySelection = (name: string) => {
+    setSelectedCategoryNames((prev) => {
+      if (prev.includes(name)) return prev.filter((x) => x !== name);
+      return [...prev, name];
+    });
+  };
+
+  const runCategoryScenario = async () => {
+    setScenarioError(null);
+    setScenarioLoading(true);
+    try {
+      const selectedSet = new Set(selectedCategoryNames);
+      if (selectedSet.size === 0) {
+        setScenarioError("请至少在「资产总结」里选中 1 个大类（可点选标签）");
+        setScenarioResult(null);
+        return;
+      }
+      const weights: Record<string, number> = {};
+      for (const c of displayCategoryList) {
+        if (!selectedSet.has(c.name)) continue;
+        const pct = Number(c.currentPct);
+        weights[c.name] = Number.isFinite(pct) && pct > 0 ? pct / 100 : 0;
+      }
+      const res = await fetch("/api/ai/category-scenarios", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          categoryWeights: weights,
+          riskProfile: scenarioRisk,
+          horizon: scenarioHorizon,
+          includeCategories: selectedCategoryNames,
+          excludeCategories: [],
+        }),
+      });
+      const data = (await res.json().catch(() => null)) as CategoryScenarioResult | null;
+      if (!res.ok) {
+        const msg = data?.message ?? `请求失败（${res.status}）`;
+        setScenarioError(msg);
+        setScenarioResult(null);
+        return;
+      }
+      setScenarioResult(data ?? null);
+      setScenarioExpanded(true);
+    } catch {
+      setScenarioError("网络异常，请稍后重试");
+      setScenarioResult(null);
+    } finally {
+      setScenarioLoading(false);
+    }
+  };
+
+  const runAiJudgment = async () => {
+    setAiJudgmentError(null);
+    setAiJudgmentLoading(true);
+    setAiJudgmentSnap(null);
+    try {
+      const selectedSet = new Set(selectedCategoryNames);
+      if (selectedSet.size === 0) {
+        setAiJudgmentError("请先在「资产总结」中选中至少 1 个大类");
+        return;
+      }
+      const weights: Record<string, number> = {};
+      for (const c of displayCategoryList) {
+        if (!selectedSet.has(c.name)) continue;
+        const pct = Number(c.currentPct);
+        weights[c.name] = Number.isFinite(pct) && pct > 0 ? pct / 100 : 0;
+      }
+      const res = await fetch("/api/ai/category-scenarios", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          categoryWeights: weights,
+          riskProfile: scenarioRisk,
+          horizon: scenarioHorizon,
+          includeCategories: selectedCategoryNames,
+          excludeCategories: [],
+        }),
+      });
+      const data = (await res.json().catch(() => null)) as CategoryScenarioResult | null;
+      if (!res.ok) {
+        setAiJudgmentError(data?.message ?? `请求失败（${res.status}）`);
+        return;
+      }
+      setAiJudgmentSnap({
+        summary: data?.summary,
+        volatilityWarning: data?.volatilityWarning,
+        disclaimer: data?.disclaimer,
+      });
+    } catch {
+      setAiJudgmentError("网络异常，请稍后重试");
+    } finally {
+      setAiJudgmentLoading(false);
+    }
+  };
 
   const runSeed = async () => {
     setSeeding(true);
@@ -859,9 +1184,12 @@ function HomeInner() {
         </div>
       </header>
 
-      {/* h-dvh + flex-1 + overflow-auto：滚轮在表格外壳上生效；内层 pb 把最后一行顶过固定底栏 */}
-      <div className="overflow-auto overscroll-y-auto border border-slate-200 dark:border-slate-700 rounded-lg flex-1 min-h-0 touch-pan-y">
-        <div className="min-w-min pb-[min(42vh,20rem)]">
+      {/* h-dvh + flex-1 + overflow-auto：滚轮在表格外壳上生效；底栏在 flex 流内 shrink-0，不再 fixed 遮挡 */}
+      <div
+        className="overflow-auto overscroll-y-auto border border-slate-200 dark:border-slate-700 rounded-lg flex-1 min-h-0 touch-pan-y"
+        style={{ minHeight: "min(36vh, 420px)" }}
+      >
+        <div className="min-w-min">
         <table className="table-fixed w-full min-w-[920px] border-collapse">
           <colgroup>
             <col style={{ width: "8%" }} />
@@ -887,7 +1215,7 @@ function HomeInner() {
               </th>
               <th
                 className="text-right py-1.5 px-1 text-xs font-medium border-b border-slate-200 dark:border-slate-600"
-                title="权益、债权、商品为持仓份额；现金·美元/日元为本列填外币余额（保存后写入当日记录，市值=余额×汇率）；现金·人民币与理财不按份额计价"
+                title="权益、债权、商品为持仓份额；现金·美元/日元为本列外币余额；现金·人民币与理财在本列直接改余额/总市值（元），与底部「保存表格修改」写入当日记录"
               >
                 份额
               </th>
@@ -899,12 +1227,17 @@ function HomeInner() {
                 {navRateStamp && <span className="ml-1 text-[10px] font-normal text-slate-400">({navRateStamp})</span>}
               </th>
               <th className="text-right py-1.5 px-1 text-xs font-semibold border-b border-slate-200 dark:border-slate-600 whitespace-nowrap">市值</th>
-              <th className="text-right py-1.5 px-1 text-xs font-semibold border-b border-slate-200 dark:border-slate-600 whitespace-nowrap">总成本</th>
               <th
                 className="text-right py-1.5 px-1 text-xs font-semibold border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
-                title="收益率 = (市值 + 累计现金分红 − 总成本) / 总成本；分红来自「记一笔」分红流水"
+                title="现金·人民币、理财：本列不展示（只维护余额/估值即可）。美元/日元外币与债/商/权仍填总成本。"
               >
-                持仓盈亏
+                总成本
+              </th>
+              <th
+                className="text-right py-1.5 px-1 text-xs font-medium border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
+                title="近 7 天涨跌 %（按历史净值/收盘价对当前持仓估值；仅债/商/权有值）"
+              >
+                本周盈亏%
               </th>
               <th
                 className="text-right py-1.5 px-1 text-xs font-medium border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
@@ -914,15 +1247,15 @@ function HomeInner() {
               </th>
               <th
                 className="text-right py-1.5 px-1 text-xs font-medium border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
-                title="相对约三个月前月末持仓市值的涨跌 %"
+                title="年初至今涨跌 %（按历史净值/收盘价对当前持仓估值；仅债/商/权有值）"
               >
-                三月盈亏%
+                年度盈亏%
               </th>
               <th
-                className="text-right py-1.5 px-1 text-xs font-medium border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
-                title="相对约六个月前月末持仓市值的涨跌 %"
+                className="text-right py-1.5 px-1 text-xs font-semibold border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
+                title="收益率 = (市值 + 累计现金分红 − 总成本) / 总成本。现金·人民币、理财不展示（同上）。"
               >
-                六月盈亏%
+                持仓盈亏
               </th>
             </tr>
           </thead>
@@ -976,8 +1309,11 @@ function HomeInner() {
                   const cost = r.costBasis;
                   const div = Number(r.totalDividends);
                   const divSafe = Number.isFinite(div) ? div : 0;
+                  const skipCostMetrics = isCashCnyOrWealthBalanceRow(r);
                   const roi =
-                    cost > 0 ? ((r.marketValue + divSafe - cost) / cost) * 100 : null;
+                    skipCostMetrics || cost <= 0
+                      ? null
+                      : ((r.marketValue + divSafe - cost) / cost) * 100;
                   const priceOrRateCell =
                     isCashCategory(r.category) && isCashCnySub(r.subCategory)
                       ? "—"
@@ -1005,19 +1341,9 @@ function HomeInner() {
                           className="block truncate text-slate-800 dark:text-slate-200 hover:underline"
                           title={
                             r.dca
-                              ? `${r.name} · 定投 ¥${fmtNum(r.dca.periodAmount)}/${r.dca.frequencyLabel} · 下期 ${r.dca.nextDate}`
+                              ? `${r.name} · 定投 ¥${fmtNum(r.dca.periodAmount)}/${r.dca.frequencyLabel} · 下期 ${r.dca.nextDate} · 持仓需在产品页「补记定投流水」`
                               : r.name
                           }
-                          onClick={(e) => {
-                            if (tableDirty) {
-                              e.preventDefault();
-                              setLeaveNavHref(
-                                accountFilter
-                                  ? `/products/${r.productId}?account=${encodeURIComponent(accountFilter)}`
-                                  : `/products/${r.productId}`
-                              );
-                            }
-                          }}
                         >
                           <span className="block truncate">{r.name}</span>
                           {r.dca && (
@@ -1054,6 +1380,14 @@ function HomeInner() {
                             draftForeignStr={tableDrafts[r.productId]?.foreignBalanceStr}
                             onForeignDraftChange={commitForeignBalanceDraft}
                           />
+                        ) : isCashCnyOrWealthBalanceRow(r) ? (
+                          <EditablePriceBalanceCell
+                            productId={r.productId}
+                            latestPrice={r.latestPrice}
+                            variant={isWealthCategory(r.category) ? "wealth" : "cny"}
+                            draftStr={tableDrafts[r.productId]?.priceBalanceStr}
+                            onDraftChange={commitPriceBalanceDraft}
+                          />
                         ) : (
                           <EditableUnitsCell
                             productId={r.productId}
@@ -1061,6 +1395,7 @@ function HomeInner() {
                             units={r.units}
                             unitsOverride={r.unitsOverride}
                             ledgerLocked={r.ledgerLocked ?? r.hasTransactions}
+                            migrationEditable={usesShareTimesNavForCategory(r.category)}
                             hasExistingData={r.unitsOverride != null || r.hasTransactions}
                             draftUnitsStr={tableDrafts[r.productId]?.unitsStr}
                             onUnitsDraftChange={commitUnitsDraft}
@@ -1077,33 +1412,50 @@ function HomeInner() {
                         ¥ {fmtNum(r.marketValue)}
                       </td>
                       <td className="text-right py-0.5 px-1 tabular-nums text-sm font-bold text-slate-800 dark:text-slate-200 whitespace-nowrap">
-                        <EditableCostCell
-                          productId={r.productId}
-                          cost={r.costBasis}
-                          costOverride={r.costOverride}
-                          ledgerLocked={r.ledgerLocked ?? r.hasTransactions}
-                          draftCostStr={tableDrafts[r.productId]?.costStr}
-                          onCostDraftChange={commitCostDraft}
-                        />
+                        {skipCostMetrics ? (
+                          <span
+                            className="text-slate-400 dark:text-slate-500 font-normal font-mono tabular-nums"
+                            title="现金·人民币与理财以余额/估值为主，总览不维护总成本；美元/日元与债/商/权仍填总成本。"
+                          >
+                            —
+                          </span>
+                        ) : (
+                          <EditableCostCell
+                            productId={r.productId}
+                            category={r.category}
+                            cost={r.costBasis}
+                            costOverride={r.costOverride}
+                            ledgerLocked={r.ledgerLocked ?? r.hasTransactions}
+                            migrationEditable={usesShareTimesNavForCategory(r.category)}
+                            draftCostStr={tableDrafts[r.productId]?.costStr}
+                            onCostDraftChange={commitCostDraft}
+                          />
+                        )}
                       </td>
-                      <td
-                        className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap"
-                        title={
-                          divSafe > 0
-                            ? `(市值+累计分红−总成本)/总成本；累计分红 ¥${fmtNum(divSafe)}`
-                            : "(市值+累计分红−总成本)/总成本；无总成本时为空"
-                        }
-                      >
-                        <PnLTag value={roi} suffix="%" />
+                      <td className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap" title="近 7 天涨跌 %">
+                        <PnLTag value={r.pnl3mPct ?? null} suffix="%" />
                       </td>
                       <td className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap" title="相对月初市值或本月买入的涨跌 %">
                         <PnLTag value={r.pnl1mPct ?? null} suffix="%" />
                       </td>
-                      <td className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap" title="相对约三个月前月末市值的涨跌 %">
-                        <PnLTag value={r.pnl3mPct ?? null} suffix="%" />
-                      </td>
-                      <td className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap" title="相对约六个月前月末市值的涨跌 %">
+                      <td className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap" title="年初至今涨跌 %">
                         <PnLTag value={r.pnl6mPct ?? null} suffix="%" />
+                      </td>
+                      <td
+                        className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap"
+                        title={
+                          skipCostMetrics
+                            ? "本类不计算持仓盈亏%"
+                            : divSafe > 0
+                              ? `(市值+累计分红−总成本)/总成本；累计分红 ¥${fmtNum(divSafe)}`
+                              : "(市值+累计分红−总成本)/总成本；无总成本时为空"
+                        }
+                      >
+                        {skipCostMetrics ? (
+                          <span className="text-slate-400 dark:text-slate-500 text-xs">—</span>
+                        ) : (
+                          <PnLTag value={roi} suffix="%" />
+                        )}
                       </td>
                     </tr>
                   );
@@ -1145,8 +1497,8 @@ function HomeInner() {
         <p className="shrink-0 mt-2 text-slate-500 text-sm">暂无产品，点击下方「+ 新增产品」添加第一个资产。</p>
       )}
 
-      {/* 固定在页面底部的操作栏 + 资产总结；表格区 max-h 已按「顶栏 + 本栏」动态让出视口 */}
-      <div className="fixed bottom-0 left-0 right-0 z-[100] pointer-events-auto border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-[0_-4px_12px_rgba(0,0,0,0.08)] dark:shadow-[0_-4px_12px_rgba(0,0,0,0.3)]">
+      {/* 操作栏 + 资产总结：与表格局部同列排版，避免 fixed 盖住末行 */}
+      <div className="shrink-0 max-h-[min(52dvh,calc(100dvh-9rem))] overflow-y-auto pointer-events-auto border-t border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-[0_-4px_12px_rgba(0,0,0,0.08)] dark:shadow-[0_-4px_12px_rgba(0,0,0,0.3)]">
         <div className="max-w-[1400px] mx-auto p-4">
         <div className="space-y-2 mb-4">
           <div className="flex flex-wrap items-center gap-x-0 gap-y-2 text-[11px] text-slate-500 dark:text-slate-400">
@@ -1256,6 +1608,30 @@ function HomeInner() {
                 产品详情
               </Link>
               <Link
+                href="/products?view=dca"
+                className="px-2.5 py-1.5 text-sm rounded border border-slate-400 dark:border-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 inline-block"
+                onClick={(e) => {
+                  if (tableDirty) {
+                    e.preventDefault();
+                    setLeaveNavHref("/products?view=dca");
+                  }
+                }}
+              >
+                查看定投计划
+              </Link>
+              <Link
+                href="/snapshots"
+                className="px-2.5 py-1.5 text-sm rounded border border-slate-400 dark:border-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 inline-block"
+                onClick={(e) => {
+                  if (tableDirty) {
+                    e.preventDefault();
+                    setLeaveNavHref("/snapshots");
+                  }
+                }}
+              >
+                看瞬间
+              </Link>
+              <Link
                 href="/snapshots/compare"
                 className="px-2.5 py-1.5 text-sm rounded border border-slate-400 dark:border-slate-500 hover:bg-slate-100 dark:hover:bg-slate-700 inline-block"
                 onClick={(e) => {
@@ -1290,6 +1666,31 @@ function HomeInner() {
               </button>
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-2 pt-2 mt-1 border-t border-dashed border-slate-200 dark:border-slate-600 w-full">
+            <span className="text-[11px] text-slate-500 dark:text-slate-400 select-none shrink-0 w-full sm:w-auto">
+              AI（实验）
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setAiJudgmentError(null);
+                setAiJudgmentSnap(null);
+                setShowAiJudgmentModal(true);
+              }}
+              className="px-2.5 py-1.5 text-sm rounded bg-indigo-600 text-white hover:bg-indigo-500"
+              title="基于当前大类占比生成简要 AI 解读（与大类对比共用接口，侧重摘要与风险提示）"
+            >
+              AI 判断
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowCategoryScenarioModal(true)}
+              className="px-2.5 py-1.5 text-sm rounded border border-indigo-400/80 text-indigo-800 dark:text-indigo-200 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
+              title="打开大类对比：风险偏好、周期与情景建议"
+            >
+              大类对比
+            </button>
+          </div>
           {(tableDirty || tableSaving) && (
             <div className="flex flex-wrap gap-2 justify-end items-center w-full border-t border-slate-100 dark:border-slate-700/80 pt-2">
               <button
@@ -1308,7 +1709,7 @@ function HomeInner() {
                 onClick={() => void saveTableDrafts()}
                 disabled={!tableDirty || tableSaving}
                 className="px-3 py-1.5 text-sm rounded bg-slate-800 text-white hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                title="将表格中已修改的份额、总成本写入数据库（与「记一笔」一样需确认后才落库）"
+                title="将表格中已修改的份额、现金/理财余额与估值、总成本写入数据库（与「记一笔」一样需确认后才落库）"
               >
                 {tableSaving ? "保存中…" : "保存表格修改"}
               </button>
@@ -1317,7 +1718,7 @@ function HomeInner() {
         </div>
         {tableDirty && (
           <p className="text-sm text-amber-700 dark:text-amber-400 mb-2 px-1">
-            当前有未保存的份额或总成本修改；离开本页、刷新或关闭标签页前请先点「保存表格修改」，否则会提示确认。
+            当前有未保存的表格修改（份额、现金/理财余额或估值、总成本）；离开本页、刷新或关闭标签页前请先点「保存表格修改」，否则会提示确认。
           </p>
         )}
         {tableSaveError && (
@@ -1331,40 +1732,111 @@ function HomeInner() {
         <div className="rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 p-4">
           <div className="grid grid-cols-2 md:grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
             <div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5">总资产{accountFilter ? "（筛选）" : ""}</div>
-              <div className="text-2xl font-mono font-semibold tabular-nums">¥ {fmtNum(displayTotal)}</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5">
+                总资产
+                {accountFilter ? "（筛选）" : ""}
+                {assetSummaryScope.categorySubsetActive ? "（选中大类）" : ""}
+              </div>
+              <div className="text-2xl font-mono font-semibold tabular-nums">
+                ¥ {fmtNum(assetSummaryScope.displayTotal)}
+              </div>
             </div>
             <div>
               <div
                 className="text-xs text-slate-500 dark:text-slate-400 mb-0.5"
-                title="债/商/权：本月持仓盈亏合计 ÷ 上述大类月初参考市值合计（%）；与表格「本月盈亏%」加权口径一致；月初合计为 0 时为 —"
+                title={
+                  assetSummaryScope.categorySubsetActive
+                    ? "当前为下方选中大类之和：债/商/权本月持仓盈亏 ÷ 对应月初参考市值（%）；与全库口径一致，仅缩小范围。"
+                    : "债/商/权：本月持仓盈亏合计 ÷ 上述大类月初参考市值合计（%）；与表格「本月盈亏%」加权口径一致；月初合计为 0 时为 —"
+                }
               >
-                本月盈亏（持仓）%
+                本月盈亏（持仓）%{assetSummaryScope.categorySubsetActive ? " · 选中" : ""}
               </div>
-              <div className={`text-xl font-mono tabular-nums ${monthPct != null ? (monthPct >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400") : "text-slate-500"}`}>
-                {monthPct != null ? (monthPct >= 0 ? "+" : "") + monthPct.toFixed(2) + "%" : "—"}
+              <div
+                className={`text-xl font-mono tabular-nums ${
+                  assetSummaryScope.monthPct != null
+                    ? assetSummaryScope.monthPct >= 0
+                      ? "text-green-600 dark:text-green-400"
+                      : "text-red-600 dark:text-red-400"
+                    : "text-slate-500"
+                }`}
+              >
+                {assetSummaryScope.monthPct != null
+                  ? (assetSummaryScope.monthPct >= 0 ? "+" : "") + assetSummaryScope.monthPct.toFixed(2) + "%"
+                  : "—"}
               </div>
             </div>
             <div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5" title="自然月内卖出实现盈亏 + 分红，流水日期为准；含已清仓产品">
-                本月实现（卖/分红）
+              <div
+                className="text-xs text-slate-500 dark:text-slate-400 mb-0.5"
+                title={
+                  assetSummaryScope.categorySubsetActive
+                    ? "下方选中大类内，债/商/权产品「本月盈亏」列（元）之和；与左侧 % 同源，仅展示合计金额。"
+                    : "债/商/权：本月持仓推算盈亏合计（元），与接口 monthPnL、表格内本月盈亏一致；现金/理财等未计入。"
+                }
+              >
+                本月盈亏（持仓）· 合计{assetSummaryScope.categorySubsetActive ? " · 选中" : ""}
               </div>
-              <div className={`text-xl font-mono tabular-nums ${monthRealizedPnl != null ? (monthRealizedPnl >= 0 ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400") : "text-slate-500"}`}>
-                {monthRealizedPnl != null ? (monthRealizedPnl >= 0 ? "+" : "") + "¥ " + fmtNum(monthRealizedPnl) : "—"}
+              <div
+                className={`text-xl font-mono tabular-nums ${
+                  assetSummaryScope.monthPnLYuan != null
+                    ? assetSummaryScope.monthPnLYuan >= 0
+                      ? "text-green-600 dark:text-green-400"
+                      : "text-red-600 dark:text-red-400"
+                    : "text-slate-500"
+                }`}
+              >
+                {assetSummaryScope.monthPnLYuan != null
+                  ? (assetSummaryScope.monthPnLYuan >= 0 ? "+" : "") +
+                    "¥ " +
+                    fmtNum(assetSummaryScope.monthPnLYuan)
+                  : "—"}
               </div>
             </div>
             <div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5">整体风险</div>
-              <div className="text-xl font-mono tabular-nums">{overallRisk != null ? "R" + overallRisk.toFixed(1) : "—"}</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400 mb-0.5">
+                整体风险{assetSummaryScope.categorySubsetActive ? " · 选中" : ""}
+              </div>
+              <div className="text-xl font-mono tabular-nums">
+                {assetSummaryScope.overallRisk != null ? "R" + assetSummaryScope.overallRisk.toFixed(1) : "—"}
+              </div>
             </div>
           </div>
           <div>
-            <div className="text-xs text-slate-500 dark:text-slate-400 mb-2">各大类占比 · 当前 vs 目标{accountFilter ? "（筛选）" : ""}</div>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                各大类占比 · 当前 vs 目标{accountFilter ? "（筛选）" : ""}（可点选；按选中集合重算为 100%）
+              </div>
+              {displayCategoryList.length > 0 && (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 text-[11px]"
+                    onClick={() => setSelectedCategoryNames(displayCategoryList.map((c) => c.name))}
+                  >
+                    全选
+                  </button>
+                  <button
+                    type="button"
+                    className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 text-[11px]"
+                    onClick={() => setSelectedCategoryNames([])}
+                  >
+                    清空
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="flex flex-wrap gap-2 sm:gap-3">
-              {displayCategoryList.map((c) => (
+              {interactiveCategoryList.map((c) => (
                 <div
                   key={c.name}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-slate-200/80 dark:border-slate-600/80 bg-slate-100/90 dark:bg-slate-800/80 px-2 py-1"
+                  onClick={() => toggleCategorySelection(c.name)}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 transition ${
+                    selectedCategoryNames.includes(c.name)
+                      ? "border-slate-200/80 dark:border-slate-600/80 bg-slate-100/90 dark:bg-slate-800/80"
+                      : "border-slate-200/60 dark:border-slate-700/70 bg-slate-50/60 dark:bg-slate-900/40 opacity-60"
+                  }`}
+                  title={selectedCategoryNames.includes(c.name) ? "点击取消该大类" : "点击纳入该大类"}
                 >
                   <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{c.name}</span>
                   <span className="text-sm tabular-nums text-slate-700 dark:text-slate-300">
@@ -1376,12 +1848,272 @@ function HomeInner() {
                   </span>
                 </div>
               ))}
-              {displayCategoryList.length === 0 && <span className="text-slate-500 text-sm">暂无数据，可点击「导入 Excel 数据」</span>}
+              {interactiveCategoryList.length === 0 && <span className="text-slate-500 text-sm">暂无数据，可点击「导入 Excel 数据」</span>}
             </div>
           </div>
         </div>
         </div>
       </div>
+
+      {showCategoryScenarioModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-[200] p-4"
+          onClick={() => setShowCategoryScenarioModal(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-2 mb-3">
+              <h2 className="text-base font-semibold text-slate-800 dark:text-slate-100">大类对比（V1）</h2>
+              <button
+                type="button"
+                className="shrink-0 px-2 py-1 text-sm rounded border border-slate-300 dark:border-slate-600"
+                onClick={() => setShowCategoryScenarioModal(false)}
+              >
+                关闭
+              </button>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+              先在下方点选纳入的大类（与资产总结联动）。联动 {selectedCategoryNames.length} 类。
+            </p>
+            {displayCategoryList.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                <button
+                  type="button"
+                  className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 text-[11px]"
+                  onClick={() => setSelectedCategoryNames(displayCategoryList.map((c) => c.name))}
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  className="px-2 py-0.5 rounded border border-slate-300 dark:border-slate-600 text-[11px]"
+                  onClick={() => setSelectedCategoryNames([])}
+                >
+                  清空
+                </button>
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2 sm:gap-3 mb-3">
+              {interactiveCategoryList.map((c) => (
+                <div
+                  key={`modal-${c.name}`}
+                  onClick={() => toggleCategorySelection(c.name)}
+                  className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 transition text-sm ${
+                    selectedCategoryNames.includes(c.name)
+                      ? "border-slate-200/80 dark:border-slate-600/80 bg-slate-100/90 dark:bg-slate-800/80"
+                      : "border-slate-200/60 dark:border-slate-700/70 bg-slate-50/60 dark:bg-slate-900/40 opacity-60"
+                  }`}
+                >
+                  <span className="font-medium text-slate-800 dark:text-slate-100">{c.name}</span>
+                  <span className="tabular-nums text-slate-700 dark:text-slate-300">
+                    {(Number.isFinite(Number(c.currentPct)) ? Number(c.currentPct) : 0).toFixed(1)}%
+                  </span>
+                  <span className="text-slate-400">/</span>
+                  <span className="tabular-nums text-slate-500 dark:text-slate-400">
+                    {(Number.isFinite(Number(c.targetPct)) ? Number(c.targetPct) : 0).toFixed(0)}%
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <select
+                className="h-8 px-2 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs"
+                value={scenarioRisk}
+                onChange={(e) => setScenarioRisk(e.target.value as "conservative" | "balanced" | "aggressive")}
+              >
+                <option value="conservative">风险偏好：稳健</option>
+                <option value="balanced">风险偏好：均衡</option>
+                <option value="aggressive">风险偏好：进取</option>
+              </select>
+              <select
+                className="h-8 px-2 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs"
+                value={scenarioHorizon}
+                onChange={(e) => setScenarioHorizon(e.target.value as "<1y" | "1-3y" | "3-5y" | "5y+")}
+              >
+                <option value="<1y">周期：小于 1 年</option>
+                <option value="1-3y">周期：1-3 年</option>
+                <option value="3-5y">周期：3-5 年</option>
+                <option value="5y+">周期：5 年以上</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => void runCategoryScenario()}
+                disabled={scenarioLoading || selectedCategoryNames.length === 0}
+                className="h-8 px-3 rounded bg-slate-900 text-white disabled:opacity-50 text-xs"
+              >
+                {scenarioLoading ? "生成中..." : "生成"}
+              </button>
+              {scenarioResult?.summary && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setScenarioExpanded((v) => !v)}
+                    className="h-8 px-3 rounded border border-slate-300 dark:border-slate-600 text-xs"
+                  >
+                    {scenarioExpanded ? "收起结果" : "展开结果"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setScenarioResult(null);
+                      setScenarioError(null);
+                    }}
+                    className="h-8 px-3 rounded border border-slate-300 dark:border-slate-600 text-xs"
+                  >
+                    清空结果
+                  </button>
+                </>
+              )}
+            </div>
+            {scenarioError && <div className="text-xs text-red-600 dark:text-red-400 mb-2">{scenarioError}</div>}
+            {scenarioResult?.summary && scenarioExpanded && (
+              <div className="text-xs text-slate-700 dark:text-slate-200 space-y-2 max-h-72 overflow-auto pr-1 border border-slate-200 dark:border-slate-600 rounded-md p-2">
+                {(scenarioResult.scenarios ?? [])
+                  .filter((s) => {
+                    if (scenarioRisk === "conservative") return s.name === "稳健";
+                    if (scenarioRisk === "aggressive") return s.name === "进取";
+                    return s.name === "均衡";
+                  })
+                  .map((s) => (
+                    <div key={s.name} className="rounded border border-slate-200 dark:border-slate-700 p-2">
+                      <div className="font-medium">{s.name}</div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300 mt-1">建议分配：{s.allocationRange}</div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300">年化：{s.annualReturnRangeNote}</div>
+                      <div className="text-[11px] text-slate-600 dark:text-slate-300">为什么这样建议：{s.whyThisForYou ?? s.reasoning}</div>
+                      {(s.decisionAngles ?? []).length > 0 && (
+                        <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                          考虑角度：{(s.decisionAngles ?? []).join("；")}
+                        </div>
+                      )}
+                      {(s.adjustments ?? []).length > 0 && (
+                        <div className="text-[11px] text-slate-600 dark:text-slate-300">调整动作：{(s.adjustments ?? []).join("；")}</div>
+                      )}
+                      {s.impact && <div className="text-[11px] text-slate-600 dark:text-slate-300">预期影响：{s.impact}</div>}
+                      {s.confidence && (
+                        <div className="text-[11px] text-slate-500 dark:text-slate-400">置信度：{s.confidence}</div>
+                      )}
+                      <div className="mt-2 rounded border border-slate-200/80 dark:border-slate-700/80 p-2">
+                        <div className="mb-1 text-[11px] text-slate-500 dark:text-slate-400">当前 vs 建议（图形对比）</div>
+                        <div className="space-y-1">
+                          {selectedCategoryNames.map((cat) => {
+                            const current = (scenarioResult.normalizedWeights?.[cat] ?? 0) * 100;
+                            const suggested = ((s.suggestedWeights ?? {})[cat] ?? 0) * 100;
+                            return (
+                              <div key={`${s.name}-${cat}`}>
+                                <div className="mb-0.5 flex items-center gap-2 text-[11px]">
+                                  <span className="w-10 shrink-0">{cat}</span>
+                                  <span className="shrink-0 tabular-nums">
+                                    {pct1(current)} {"->"} {pct1(suggested)}
+                                  </span>
+                                </div>
+                                <div
+                                  className="relative h-2 w-56 max-w-full rounded bg-slate-200/90 dark:bg-slate-700/90 overflow-hidden"
+                                  title={`当前 ${pct1(current)}；建议 ${pct1(suggested)}`}
+                                >
+                                  <div
+                                    className="h-full bg-sky-500/85"
+                                    style={{ width: `${Math.min(100, Math.max(0, current))}%` }}
+                                  />
+                                  <div
+                                    className="absolute top-0 bottom-0 w-0.5 bg-red-500"
+                                    style={{ left: `${Math.min(100, Math.max(0, suggested))}%` }}
+                                  />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showAiJudgmentModal && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-[200] p-4"
+          onClick={() => setShowAiJudgmentModal(false)}
+        >
+          <div
+            className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-2 mb-3">
+              <h2 className="text-base font-semibold text-slate-800 dark:text-slate-100">AI 判断</h2>
+              <button
+                type="button"
+                className="shrink-0 px-2 py-1 text-sm rounded border border-slate-300 dark:border-slate-600"
+                onClick={() => setShowAiJudgmentModal(false)}
+              >
+                关闭
+              </button>
+            </div>
+            <p className="text-sm text-slate-600 dark:text-slate-300 mb-3">
+              根据当前选中大类的占比、风险偏好与投资周期生成简要结论与风险提示（实验功能，非投资建议）。
+            </p>
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <select
+                className="h-8 px-2 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs"
+                value={scenarioRisk}
+                onChange={(e) => setScenarioRisk(e.target.value as "conservative" | "balanced" | "aggressive")}
+              >
+                <option value="conservative">风险偏好：稳健</option>
+                <option value="balanced">风险偏好：均衡</option>
+                <option value="aggressive">风险偏好：进取</option>
+              </select>
+              <select
+                className="h-8 px-2 rounded border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs"
+                value={scenarioHorizon}
+                onChange={(e) => setScenarioHorizon(e.target.value as "<1y" | "1-3y" | "3-5y" | "5y+")}
+              >
+                <option value="<1y">周期：小于 1 年</option>
+                <option value="1-3y">周期：1-3 年</option>
+                <option value="3-5y">周期：3-5 年</option>
+                <option value="5y+">周期：5 年以上</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => void runAiJudgment()}
+                disabled={aiJudgmentLoading || selectedCategoryNames.length === 0}
+                className="h-8 px-3 rounded bg-indigo-600 text-white disabled:opacity-50 text-xs"
+              >
+                {aiJudgmentLoading ? "生成中…" : "生成判断"}
+              </button>
+            </div>
+            {selectedCategoryNames.length === 0 && (
+              <p className="text-xs text-amber-700 dark:text-amber-300 mb-2">请先在「资产总结」中选中至少一个大类。</p>
+            )}
+            {aiJudgmentError && (
+              <div className="text-sm text-red-600 dark:text-red-400 mb-2">{aiJudgmentError}</div>
+            )}
+            {aiJudgmentSnap?.summary && (
+              <div className="space-y-3 text-sm text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-600 rounded-md p-3">
+                <div>
+                  <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">摘要</div>
+                  <p>{aiJudgmentSnap.summary}</p>
+                </div>
+                {aiJudgmentSnap.volatilityWarning && (
+                  <div>
+                    <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">波动提示</div>
+                    <p className="text-slate-600 dark:text-slate-300">{aiJudgmentSnap.volatilityWarning}</p>
+                  </div>
+                )}
+                {aiJudgmentSnap.disclaimer && (
+                  <div>
+                    <div className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">说明</div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">{aiJudgmentSnap.disclaimer}</p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 弹窗：新增产品 */}
       {showAddProduct && (
@@ -1426,7 +2158,7 @@ function HomeInner() {
             setShowAddTx(false);
             if (info?.mergedOpening) {
               setRefreshMessage(
-                "已在您这笔买入之前自动增加一笔「建仓」流水（对应原先总览中的份额与总成本），并已清空覆盖字段，避免只按新单汇总。"
+                "已在您这笔流水之前自动增加一笔「建仓」买入（对应原先总览中的份额与总成本），并已清空覆盖字段，避免只按新单汇总。"
               );
               window.setTimeout(() => setRefreshMessage(null), 10000);
             }
@@ -1483,7 +2215,7 @@ function HomeInner() {
           >
             <h2 className="text-base font-medium text-slate-800 dark:text-slate-100 mb-2">未保存的表格修改</h2>
             <p className="text-sm text-slate-600 dark:text-slate-300 mb-4">
-              您在资产表里改动了份额或总成本，尚未点「保存表格修改」。现在离开将丢弃这些改动。
+              您在资产表里改动了份额、现金/理财余额或估值或总成本，尚未点「保存表格修改」。现在离开将丢弃这些改动。
             </p>
             <div className="flex flex-wrap gap-2 justify-end">
               <button
@@ -1952,6 +2684,96 @@ function ImportExcelModal({
   );
 }
 
+/** 现金·人民币 / 理财：「份额」列实为人民币余额或理财总市值，保存时 POST /api/prices */
+function EditablePriceBalanceCell({
+  productId,
+  latestPrice,
+  variant,
+  draftStr,
+  onDraftChange,
+}: {
+  productId: string;
+  latestPrice: number | null;
+  variant: "cny" | "wealth";
+  draftStr?: string;
+  onDraftChange: (productId: string, value: string | undefined) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(() => editInputInitial(latestPrice ?? 0));
+
+  const baselineStr = () =>
+    draftStr !== undefined ? draftStr : editInputInitial(latestPrice ?? 0);
+
+  const commitLocal = () => {
+    const p = parseOverrideForPatch(value);
+    if (p !== "invalid" && overrideSnapshotEquals(p, latestPrice ?? null)) {
+      onDraftChange(productId, undefined);
+    } else {
+      onDraftChange(productId, value);
+    }
+    setEditing(false);
+  };
+
+  const showDraftPending = isForeignBalanceDraftPending(draftStr, latestPrice ?? null);
+  const unitHint = variant === "wealth" ? "估值" : "CNY";
+  const placeHolder = variant === "wealth" ? "总金额" : "余额";
+
+  if (editing) {
+    return (
+      <span className="inline-flex flex-nowrap items-center gap-1 justify-end w-full whitespace-nowrap">
+        <input
+          type="number"
+          step="any"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commitLocal();
+            if (e.key === "Escape") {
+              setValue(baselineStr());
+              setEditing(false);
+            }
+          }}
+          className="w-24 text-right py-0 px-1 rounded border border-slate-400 dark:border-slate-500 bg-white dark:bg-slate-800 text-sm"
+          autoFocus
+          placeholder={placeHolder}
+        />
+        <span className="text-[10px] text-slate-500 shrink-0">{unitHint}</span>
+        <button
+          type="button"
+          onClick={() => commitLocal()}
+          className="text-xs px-1.5 py-0.5 rounded bg-slate-600 text-white hover:bg-slate-700 shrink-0"
+        >
+          完成
+        </button>
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 justify-end whitespace-nowrap">
+      <button
+        type="button"
+        onClick={() => {
+          setValue(baselineStr());
+          setEditing(true);
+        }}
+        className="text-right hover:bg-slate-200 dark:hover:bg-slate-600 rounded px-1 -mx-1 tabular-nums whitespace-nowrap"
+        title={
+          variant === "wealth"
+            ? "点击修改理财当前总金额/估值（元）；点「完成」后在底部「保存表格修改」写入（与「更新净值」同一数据）"
+            : "点击修改现金·人民币账户余额（元）；点「完成」后在底部「保存表格修改」写入"
+        }
+      >
+        {displayForeignBalanceWithDraft(latestPrice, draftStr)}
+        <span className="text-slate-400 text-[10px] ml-0.5">{unitHint}</span>
+      </button>
+      {showDraftPending && (
+        <span className="text-[10px] text-amber-600 dark:text-amber-400 whitespace-nowrap">待保存</span>
+      )}
+    </span>
+  );
+}
+
 /** 现金·美元/日元：「份额」列实为外币余额，保存时 POST /api/prices（与「更新净值」一致） */
 function EditableCashForeignBalanceCell({
   productId,
@@ -2043,6 +2865,7 @@ function EditableUnitsCell({
   units,
   unitsOverride,
   ledgerLocked,
+  migrationEditable,
   hasExistingData,
   draftUnitsStr,
   onUnitsDraftChange,
@@ -2052,6 +2875,8 @@ function EditableUnitsCell({
   units: number;
   unitsOverride: number | null;
   ledgerLocked: boolean;
+  /** 权益/债权/商品等：有流水时仍可改「迁移期初份额」 */
+  migrationEditable: boolean;
   hasExistingData: boolean;
   draftUnitsStr?: string;
   onUnitsDraftChange: (productId: string, value: string | undefined) => void;
@@ -2079,18 +2904,22 @@ function EditableUnitsCell({
     );
   }
 
-  if (ledgerLocked) {
+  const migrationEdit = ledgerLocked && migrationEditable;
+
+  if (ledgerLocked && !migrationEdit) {
     return (
-      <span
-        className="tabular-nums text-slate-600 dark:text-slate-400"
-        title="已有流水：份额由「记一笔」汇总，不可手改。调整请记买入/卖出。"
-      >
+      <span className="tabular-nums text-slate-600 dark:text-slate-400" title="已有流水且本行不适用迁移期初手改。">
         {fmtNum(units)}
       </span>
     );
   }
 
-  const baselineStr = () => (draftUnitsStr !== undefined ? draftUnitsStr : editInputInitial(unitsOverride ?? units));
+  const baselineStr = () =>
+    draftUnitsStr !== undefined
+      ? draftUnitsStr
+      : migrationEdit
+        ? editInputInitial(unitsOverride ?? 0)
+        : editInputInitial(unitsOverride ?? units);
 
   const commitLocal = () => {
     const p = parseOverrideForPatch(value);
@@ -2117,14 +2946,19 @@ function EditableUnitsCell({
     setEditing(true);
   };
 
-  const showDraftPending = isUnitsDraftPending(draftUnitsStr, unitsOverride);
+  const previewMain = migrationEdit ? fmtNum(units) : displayUnitsWithDraft(units, draftUnitsStr);
+  const showDraftPending = isUnitsDraftPending(draftUnitsStr, unitsOverride ?? null);
 
   return (
     <>
       {confirmOpen && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[200]" onClick={() => setConfirmOpen(false)}>
           <div className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-sm p-4" onClick={(e) => e.stopPropagation()}>
-            <p className="text-sm text-slate-700 dark:text-slate-200 mb-4">已存在流水或曾填写过份额，确定要再次修改份额吗？</p>
+            <p className="text-sm text-slate-700 dark:text-slate-200 mb-4">
+              {migrationEdit
+                ? "将修改「迁移期初份额」（与流水合并得到当前份额），确定继续吗？"
+                : "已存在流水或曾填写过份额，确定要再次修改份额吗？"}
+            </p>
             <div className="flex gap-2 justify-end">
               <button type="button" onClick={() => setConfirmOpen(false)} className="px-3 py-1.5 rounded border border-slate-300 dark:border-slate-600">取消</button>
               <button type="button" onClick={confirmAndEdit} className="px-3 py-1.5 rounded bg-slate-700 text-white">确定</button>
@@ -2164,9 +2998,13 @@ function EditableUnitsCell({
             type="button"
             onClick={startEdit}
             className="text-right hover:bg-slate-200 dark:hover:bg-slate-600 rounded px-1 -mx-1 tabular-nums"
-            title="点击修改份额；改完后点「完成」，再在页面底部「保存表格修改」写入数据库"
+            title={
+              migrationEdit
+                ? "当前列为合并后份额；点击修改的是总览中的迁移期初份额，保存表格后写入"
+                : "点击修改份额；改完后点「完成」，再在页面底部「保存表格修改」写入数据库"
+            }
           >
-            {displayUnitsWithDraft(units, draftUnitsStr)}
+            {previewMain}
           </button>
           {showDraftPending && (
             <span className="text-[10px] text-amber-600 dark:text-amber-400 whitespace-nowrap">待保存</span>
@@ -2179,34 +3017,48 @@ function EditableUnitsCell({
 
 function EditableCostCell({
   productId,
+  category,
   cost,
   costOverride,
   ledgerLocked,
+  migrationEditable,
   draftCostStr,
   onCostDraftChange,
 }: {
   productId: string;
+  category: string;
   cost: number;
   costOverride: number | null;
   ledgerLocked: boolean;
+  migrationEditable: boolean;
   draftCostStr?: string;
   onCostDraftChange: (productId: string, value: string | undefined) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(() => editInputInitial(costOverride ?? cost));
 
-  if (ledgerLocked) {
+  const migrationEdit = ledgerLocked && migrationEditable;
+  const cashOrWealthTableCost =
+    isCashCategory(category) || isWealthCategory(category);
+  const allowCostEdit = !ledgerLocked || migrationEdit || cashOrWealthTableCost;
+
+  if (!allowCostEdit) {
     return (
       <span
         className="tabular-nums text-slate-700 dark:text-slate-300"
-        title="已有流水：总成本由买入金额汇总（卖出按均摊成本扣减），不可手改。"
+        title="已有流水：债/商/权总成本由买入/卖出汇总；现金·理财可在本表直接改总成本。"
       >
         ¥ {fmtNum(cost)}
       </span>
     );
   }
 
-  const baselineStr = () => (draftCostStr !== undefined ? draftCostStr : editInputInitial(costOverride ?? cost));
+  const baselineStr = () =>
+    draftCostStr !== undefined
+      ? draftCostStr
+      : migrationEdit
+        ? editInputInitial(costOverride ?? 0)
+        : editInputInitial(costOverride ?? cost);
 
   const commitLocal = () => {
     const p = parseOverrideForPatch(value);
@@ -2218,7 +3070,8 @@ function EditableCostCell({
     setEditing(false);
   };
 
-  const showDraftPending = isCostDraftPending(draftCostStr, costOverride);
+  const showDraftPending = isCostDraftPending(draftCostStr, costOverride ?? null);
+  const costPreview = migrationEdit ? fmtNum(cost) : displayCostWithDraft(cost, draftCostStr);
 
   if (editing) {
     return (
@@ -2258,9 +3111,15 @@ function EditableCostCell({
           setEditing(true);
         }}
         className="text-right hover:bg-slate-200 dark:hover:bg-slate-600 rounded px-1 -mx-1"
-        title="点击修改总成本；改完后点「完成」，再在页面底部「保存表格修改」写入数据库"
+        title={
+          migrationEdit
+            ? "当前为合并后总成本；点击修改迁移期初总成本，保存表格后写入"
+            : cashOrWealthTableCost
+              ? "现金·理财：总成本可在本表维护（腾挪、利息等不必记流水）；保存表格后写入"
+              : "点击修改总成本；改完后点「完成」，再在页面底部「保存表格修改」写入数据库"
+        }
       >
-        ¥ {displayCostWithDraft(cost, draftCostStr)}
+        ¥ {costPreview}
       </button>
       {showDraftPending && (
         <span className="text-[10px] text-amber-600 dark:text-amber-400 whitespace-nowrap">待保存</span>
@@ -2632,9 +3491,19 @@ function AddProductModal({
     if (!usesShareTimesNavForCategory(c)) {
       setUnitsStr("");
       setBuyNavStr("");
+      setPositionInputMode("units_nav");
+      setOpeningDateStr(new Date().toISOString().slice(0, 10));
+      setTotalCostStr("");
+      setManualNavStr("");
     }
   };
   const [riskLevel, setRiskLevel] = useState("");
+  /** 与记一笔一致：份额+单价，或建仓日+总成本（服务端按日取价推算份额） */
+  const [positionInputMode, setPositionInputMode] = useState<"units_nav" | "date_cost">("units_nav");
+  const [openingDateStr, setOpeningDateStr] = useState(() => new Date().toISOString().slice(0, 10));
+  const [totalCostStr, setTotalCostStr] = useState("");
+  const [fundCutoff, setFundCutoff] = useState<"before_15" | "after_15">("before_15");
+  const [manualNavStr, setManualNavStr] = useState("");
   const [unitsStr, setUnitsStr] = useState("");
   const [buyNavStr, setBuyNavStr] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -2665,13 +3534,47 @@ function AddProductModal({
   const computedCost =
     positionPairValid && unitsNum !== null && navNum !== null ? unitsNum * navNum : null;
 
+  const inferredAssetType = useMemo(
+    () => inferProductType(category, subCategory, code.trim() || null),
+    [category, subCategory, code]
+  );
+
+  const totalCostNum = (() => {
+    const t = totalCostStr.trim().replace(/,/g, "");
+    if (t === "") return null;
+    const n = parseFloat(t);
+    return Number.isFinite(n) ? n : NaN;
+  })();
+  const manualNavNum = (() => {
+    const t = manualNavStr.trim().replace(/,/g, "");
+    if (t === "") return null;
+    const n = parseFloat(t);
+    return Number.isFinite(n) ? n : NaN;
+  })();
+  const openingYmdOk = /^\d{4}-\d{2}-\d{2}$/.test(openingDateStr.trim());
+  const dateCostFilled = openingYmdOk && totalCostNum != null && !Number.isNaN(totalCostNum) && totalCostNum > 0;
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
     setSubmitError(null);
-    if (showPosition && hasAnyPosition && !positionPairValid) {
+    if (showPosition && positionInputMode === "units_nav" && hasAnyPosition && !positionPairValid) {
       setSubmitError("请同时填写有效的份额与买入净值（非负数字），或两项都留空。");
       return;
+    }
+    if (showPosition && positionInputMode === "date_cost") {
+      if (!openingYmdOk) {
+        setSubmitError("请选择有效的建仓日期。");
+        return;
+      }
+      if (totalCostNum == null || Number.isNaN(totalCostNum) || totalCostNum <= 0) {
+        setSubmitError("请填写大于 0 的总成本（元）。");
+        return;
+      }
+      if (manualNavStr.trim() !== "" && (manualNavNum == null || Number.isNaN(manualNavNum) || manualNavNum <= 0)) {
+        setSubmitError("手动建仓单价须为大于 0 的有效数字，或留空以自动取价。");
+        return;
+      }
     }
     setSubmitting(true);
     try {
@@ -2700,8 +3603,28 @@ function AddProductModal({
           account: acc,
           riskLevel: riskLevel || null,
           maturityDate: showMaturity && maturityDate.trim() ? maturityDate.trim() : null,
-          units: showPosition && positionPairValid ? unitsNum : null,
-          buyNav: showPosition && positionPairValid ? navNum : null,
+          ...(showPosition && positionInputMode === "units_nav"
+            ? {
+                openingMode: "units_nav",
+                units: positionPairValid ? unitsNum : null,
+                buyNav: positionPairValid ? navNum : null,
+              }
+            : {}),
+          ...(showPosition && positionInputMode === "date_cost"
+            ? {
+                openingMode: "date_cost",
+                openingDate: openingDateStr.trim(),
+                totalCost: totalCostNum,
+                fundCutoff: inferredAssetType === "FUND" ? fundCutoff : undefined,
+                manualNav:
+                  manualNavStr.trim() !== "" &&
+                  manualNavNum != null &&
+                  !Number.isNaN(manualNavNum) &&
+                  manualNavNum > 0
+                    ? manualNavNum
+                    : undefined,
+              }
+            : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -2748,42 +3671,154 @@ function AddProductModal({
           {showPosition ? (
             <div className="rounded-lg border border-slate-200 dark:border-slate-600 bg-slate-50/80 dark:bg-slate-900/40 p-2 space-y-2">
               <div className="text-xs text-slate-500 dark:text-slate-400">
-                初始持仓（仅权益 / 债权 / 商品：份额 × 买入净值 = 总成本；无流水时生效，可不填）
+                初始持仓（仅权益 / 债权 / 商品；无买卖流水时由手填份额与总成本生效，可不填）
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-sm text-slate-500 mb-0.5">份额</label>
+              <div className="flex flex-wrap gap-3 text-sm">
+                <label className="flex items-center gap-2 cursor-pointer">
                   <input
-                    type="text"
-                    inputMode="decimal"
-                    value={unitsStr}
-                    onChange={(e) => setUnitsStr(e.target.value)}
-                    className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-                    placeholder="如 10000"
+                    type="radio"
+                    name="addProductPositionMode"
+                    checked={positionInputMode === "units_nav"}
+                    onChange={() => {
+                      setPositionInputMode("units_nav");
+                      setOpeningDateStr(new Date().toISOString().slice(0, 10));
+                      setTotalCostStr("");
+                      setManualNavStr("");
+                    }}
                   />
-                </div>
-                <div>
-                  <label className="block text-sm text-slate-500 mb-0.5">买入成本单价（非今日市价）</label>
+                  <span>份额 + 买入单价</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
                   <input
-                    type="text"
-                    inputMode="decimal"
-                    value={buyNavStr}
-                    onChange={(e) => setBuyNavStr(e.target.value)}
-                    className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-                    placeholder="建仓时单位净值或买入价"
+                    type="radio"
+                    name="addProductPositionMode"
+                    checked={positionInputMode === "date_cost"}
+                    onChange={() => {
+                      setPositionInputMode("date_cost");
+                      setUnitsStr("");
+                      setBuyNavStr("");
+                    }}
                   />
-                </div>
+                  <span>建仓日 + 总成本</span>
+                </label>
               </div>
-              <div>
-                <label className="block text-sm text-slate-500 mb-0.5">总成本（自动）</label>
-                <div className="w-full px-2 py-1.5 rounded border border-dashed border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 font-mono tabular-nums text-slate-800 dark:text-slate-100">
-                  {computedCost != null && Number.isFinite(computedCost)
-                    ? "¥ " + fmtNum(computedCost)
-                    : hasAnyPosition && !positionPairValid
-                      ? "—（请补全两项有效数字）"
-                      : "—"}
-                </div>
-              </div>
+              {positionInputMode === "units_nav" ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-sm text-slate-500 mb-0.5">份额</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={unitsStr}
+                        onChange={(e) => setUnitsStr(e.target.value)}
+                        className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
+                        placeholder="如 10000"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm text-slate-500 mb-0.5">买入成本单价（非今日市价）</label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={buyNavStr}
+                        onChange={(e) => setBuyNavStr(e.target.value)}
+                        className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
+                        placeholder="建仓时单位净值或买入价"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm text-slate-500 mb-0.5">总成本（自动）</label>
+                    <div className="w-full px-2 py-1.5 rounded border border-dashed border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 font-mono tabular-nums text-slate-800 dark:text-slate-100">
+                      {computedCost != null && Number.isFinite(computedCost)
+                        ? "¥ " + fmtNum(computedCost)
+                        : hasAnyPosition && !positionPairValid
+                          ? "—（请补全两项有效数字）"
+                          : "—"}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm text-slate-500 mb-0.5">建仓日期（下单日）</label>
+                    <DatePickerField
+                      value={openingDateStr}
+                      onChange={(v) => setOpeningDateStr(v)}
+                      className="w-full"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-slate-500 mb-0.5">总成本（元）*</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={totalCostStr}
+                      onChange={(e) => setTotalCostStr(e.target.value)}
+                      className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
+                      placeholder="如 10000.50"
+                    />
+                  </div>
+                  {inferredAssetType === "FUND" && (
+                    <div>
+                      <div className="block text-sm text-slate-500 mb-1">基金下单时间（决定用哪一日净值）</div>
+                      <div className="flex flex-col gap-1.5 text-xs">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="addProductFundCutoff"
+                            checked={fundCutoff === "before_15"}
+                            onChange={() => setFundCutoff("before_15")}
+                          />
+                          <span>交易日 15:00 前 — 从当日起算取最早披露净值日</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="addProductFundCutoff"
+                            checked={fundCutoff === "after_15"}
+                            onChange={() => setFundCutoff("after_15")}
+                          />
+                          <span>交易日 15:00 后 — 从下一自然日起算再取最早披露净值日</span>
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                  {inferredAssetType === "STOCK" && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      股票/场内：按建仓日起取<strong>首个交易日收盘价</strong>为单价，份额 = 总成本 ÷ 单价。
+                    </p>
+                  )}
+                  {inferredAssetType !== "FUND" && inferredAssetType !== "STOCK" && (
+                    <p className="text-xs text-amber-800 dark:text-amber-200/90 bg-amber-50 dark:bg-amber-950/30 rounded px-2 py-1">
+                      当前代码形态无法自动拉取行情，请填写下方<strong>手动建仓单价</strong>（总成本 ÷ 单价 = 份额）。
+                    </p>
+                  )}
+                  <div>
+                    <label className="block text-sm text-slate-500 mb-0.5">手动建仓单价（可选）</label>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={manualNavStr}
+                      onChange={(e) => setManualNavStr(e.target.value)}
+                      className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
+                      placeholder="不填则按建仓日自动取净值/收盘价；取价失败时可填此项"
+                    />
+                  </div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    与「记一笔」一致：须填写<strong>代码</strong>（或名称可被系统匹配到代码）。保存时按规则取价，以您填的<strong>总成本</strong>为准推算份额。
+                    {dateCostFilled ? (
+                      <span className="block mt-1 font-mono tabular-nums text-slate-700 dark:text-slate-200">
+                        预览：总成本 ¥ {fmtNum(totalCostNum!)}
+                        {manualNavNum != null && !Number.isNaN(manualNavNum) && manualNavNum > 0
+                          ? ` · 若按手动单价 ${fmtUnitNav(manualNavNum)} 则份额约 ${fmtNum(totalCostNum! / manualNavNum)}`
+                          : null}
+                      </span>
+                    ) : null}
+                  </p>
+                </>
+              )}
             </div>
           ) : (
             <p className="text-xs text-slate-500 dark:text-slate-400 rounded border border-dashed border-slate-200 dark:border-slate-600 px-2 py-2">
@@ -2886,188 +3921,6 @@ function AddProductModal({
               onClick={onClose}
               className="px-3 py-1.5 rounded border border-slate-300 dark:border-slate-600"
             >
-              取消
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-3 py-1.5 rounded bg-slate-700 text-white hover:bg-slate-600 disabled:opacity-50"
-            >
-              {submitting ? "保存中…" : "保存"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-const TX_SELECT_UNSET_ACCOUNT = "（未填账户）";
-
-function groupProductsByAccountForTxSelect(
-  products: { id: string; name: string; code: string | null; account?: string | null }[]
-): [string, { id: string; name: string; code: string | null }[]][] {
-  const byAccount = new Map<string, { id: string; name: string; code: string | null }[]>();
-  for (const p of products) {
-    const label = (p.account ?? "").trim() || TX_SELECT_UNSET_ACCOUNT;
-    const list = byAccount.get(label);
-    const row = { id: p.id, name: p.name, code: p.code };
-    if (list) list.push(row);
-    else byAccount.set(label, [row]);
-  }
-  const entries = Array.from(byAccount.entries());
-  entries.sort(([a], [b]) => {
-    if (a === TX_SELECT_UNSET_ACCOUNT) return 1;
-    if (b === TX_SELECT_UNSET_ACCOUNT) return -1;
-    return a.localeCompare(b, "zh-Hans-CN");
-  });
-  for (const [, list] of entries) {
-    list.sort((x, y) => x.name.localeCompare(y.name, "zh-Hans-CN"));
-  }
-  return entries;
-}
-
-function AddTransactionModal({
-  products,
-  onClose,
-  onSaved,
-}: {
-  products: { id: string; name: string; code: string | null; account?: string | null }[];
-  onClose: () => void;
-  onSaved: (info?: { mergedOpening?: boolean }) => void;
-}) {
-  const groupedProducts = useMemo(() => groupProductsByAccountForTxSelect(products), [products]);
-  const [productId, setProductId] = useState("");
-  const [type, setType] = useState<"BUY" | "SELL" | "DIVIDEND">("BUY");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [quantity, setQuantity] = useState("");
-  const [price, setPrice] = useState("");
-  const [amount, setAmount] = useState("");
-  const [note, setNote] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!productId) return;
-    const amt = amount === "" ? (quantity && price ? Number(quantity) * Number(price) : 0) : Number(amount);
-    setSubmitting(true);
-    try {
-      const res = await fetch("/api/transactions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          productId,
-          type,
-          date: new Date(date).toISOString(),
-          quantity: Number(quantity || 0),
-          price: price === "" ? null : Number(price),
-          amount: amt,
-          note: note.trim() || undefined,
-        }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { mergedOpening?: boolean };
-      if (res.ok) onSaved({ mergedOpening: Boolean(data.mergedOpening) });
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-[200] p-4" onClick={onClose}>
-      <div
-        className="bg-white dark:bg-slate-800 rounded-lg shadow-xl max-w-md w-full p-4"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="text-lg font-medium mb-3">记一笔</h2>
-        <p className="text-xs text-slate-500 dark:text-slate-400 mb-2 leading-relaxed">
-          若该产品此前只在总览里填过份额/总成本、尚未有过买入或卖出流水，则您第一次记<strong>买入</strong>时，系统会先把原份额与总成本写成一笔「建仓」流水，再记您当前这笔，以免新流水覆盖原持仓。
-        </p>
-        <form onSubmit={submit} className="space-y-2">
-          <div>
-            <label className="block text-sm text-slate-500 mb-0.5">产品 *</label>
-            <select
-              value={productId}
-              onChange={(e) => setProductId(e.target.value)}
-              className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-              required
-            >
-              <option value="">请选择</option>
-              {groupedProducts.map(([accountLabel, list]) => (
-                <optgroup key={accountLabel} label={accountLabel}>
-                  {list.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </optgroup>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm text-slate-500 mb-0.5">类型</label>
-            <select
-              value={type}
-              onChange={(e) => setType(e.target.value as "BUY" | "SELL" | "DIVIDEND")}
-              className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-            >
-              <option value="BUY">买入</option>
-              <option value="SELL">卖出</option>
-              <option value="DIVIDEND">分红</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm text-slate-500 mb-0.5">日期</label>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="block text-sm text-slate-500 mb-0.5">份额/数量</label>
-              <input
-                type="number"
-                step="any"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-                className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-500 mb-0.5">单价（可选）</label>
-              <input
-                type="number"
-                step="any"
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-              />
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm text-slate-500 mb-0.5">金额 *（买入为正，卖出为负）</label>
-            <input
-              type="number"
-              step="0.01"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-              placeholder="自动用 份额×单价 若留空"
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-slate-500 mb-0.5">备注</label>
-            <input
-              type="text"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
-            />
-          </div>
-          <div className="flex gap-2 pt-2">
-            <button type="button" onClick={onClose} className="px-3 py-1.5 rounded border border-slate-300 dark:border-slate-600">
               取消
             </button>
             <button

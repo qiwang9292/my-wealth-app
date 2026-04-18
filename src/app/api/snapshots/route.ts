@@ -6,7 +6,7 @@ export async function GET() {
   const list = await prisma.snapshot.findMany({
     orderBy: { snapshotDate: "desc" },
     take: 50,
-    include: { items: { include: { product: { select: { name: true } } } } },
+    include: { items: { include: { product: { select: { name: true, account: true } } } } },
   });
   return NextResponse.json(list);
 }

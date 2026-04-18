@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { buildDcaProjection } from "@/lib/dca-schedule";
-import { computeLedgerFromTransactions, hasBuyOrSellTransactions } from "@/lib/ledger";
+import {
+  computeLedgerFromTransactions,
+  hasBuyOrSellTransactions,
+  ledgerMigrationOpening,
+} from "@/lib/ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -27,17 +31,21 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
   const latestNav = prices.length > 0 ? Number(String(prices[0].price)) : null;
   const navImpute =
     latestNav != null && Number.isFinite(latestNav) && latestNav > 0 ? latestNav : null;
-  const { units: ledgerUnits, costBasis: ledgerCost } = computeLedgerFromTransactions(
-    txsAsc,
-    navImpute
-  );
   const ledgerLocked = hasBuyOrSellTransactions(txsAsc);
 
   const unitsOverrideRaw = product.unitsOverride != null ? Number(String(product.unitsOverride)) : null;
   const costOverrideRaw = product.costOverride != null ? Number(String(product.costOverride)) : null;
+  const migrationOpen = ledgerMigrationOpening(ledgerLocked, unitsOverrideRaw, costOverrideRaw);
 
-  const displayUnits = ledgerLocked ? ledgerUnits : unitsOverrideRaw ?? ledgerUnits;
-  const displayCost = ledgerLocked ? ledgerCost : costOverrideRaw ?? ledgerCost;
+  const { units: ledgerUnits, costBasis: ledgerCost } = computeLedgerFromTransactions(
+    txsAsc,
+    navImpute
+  );
+  const { units: displayUnits, costBasis: displayCost } = computeLedgerFromTransactions(
+    txsAsc,
+    navImpute,
+    migrationOpen
+  );
 
   const txsDesc = [...txsAsc].reverse();
   const dcaProjection = buildDcaProjection(
@@ -71,8 +79,8 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       subCategory: product.subCategory,
       account: product.account,
       riskLevel: product.riskLevel,
-      unitsOverride: ledgerLocked ? null : uo == null ? null : Number(String(uo)),
-      costOverride: ledgerLocked ? null : co == null ? null : Number(String(co)),
+      unitsOverride: uo == null ? null : Number(String(uo)),
+      costOverride: co == null ? null : Number(String(co)),
       createdAt: product.createdAt.toISOString(),
       updatedAt: product.updatedAt.toISOString(),
       closedAt: product.closedAt ? product.closedAt.toISOString().slice(0, 10) : null,
@@ -83,15 +91,22 @@ export async function GET(_request: Request, { params }: { params: Promise<{ id:
       dcaDayOfMonth: product.dcaDayOfMonth,
       dcaWeekday: product.dcaWeekday,
       dcaAnchorDate: product.dcaAnchorDate ? product.dcaAnchorDate.toISOString().slice(0, 10) : null,
+      dcaMaterializedThroughYmd: product.dcaMaterializedThroughYmd ?? null,
       dividendMethod,
     },
     dcaProjection,
     position: {
       ledgerLocked,
+      /** 仅流水买卖的净份额/成本（不含迁移期初） */
       ledgerUnits,
       ledgerCost,
       displayUnits,
       displayCost,
+      /** 有流水时仍保留在 Product 上的迁移手填，已并入 display* */
+      migrationOpening:
+        migrationOpen != null
+          ? { units: migrationOpen.units, cost: migrationOpen.cost }
+          : null,
     },
     transactions: txsDesc.map((tx) => ({
       id: tx.id,

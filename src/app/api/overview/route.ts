@@ -13,8 +13,11 @@ import { fetchSpotFxCny } from "@/lib/fx-rates";
 import {
   computeLedgerFromTransactions,
   hasBuyOrSellTransactions,
+  ledgerMigrationOpening,
   sumDividendAmounts,
   sumRealizedPnlInMonth,
+  sumRealizedPnlInMonthByProduct,
+  type LedgerMigrationOpening,
 } from "@/lib/ledger";
 import { buildDcaProjection } from "@/lib/dca-schedule";
 import { marketValueFromUnitsAndNav } from "@/lib/market-value";
@@ -142,7 +145,29 @@ export async function GET() {
     const n = latestPriceByProduct.get(pid);
     if (n != null && Number.isFinite(n) && n > 0) navByProductForPnl.set(pid, n);
   }
-  const monthRealizedFromSells = sumRealizedPnlInMonth(txsByProduct, year, month, navByProductForPnl);
+  const migrationOpeningByProduct = new Map<string, LedgerMigrationOpening>();
+  for (const p of products) {
+    const txs = txsByProduct.get(p.id) ?? [];
+    if (!hasBuyOrSellTransactions(txs)) continue;
+    const uo = p.unitsOverride != null ? parseFloat(String(p.unitsOverride)) : null;
+    const co = p.costOverride != null ? parseFloat(String(p.costOverride)) : null;
+    const op = ledgerMigrationOpening(true, uo, co);
+    if (op) migrationOpeningByProduct.set(p.id, op);
+  }
+  const monthRealizedFromSells = sumRealizedPnlInMonth(
+    txsByProduct,
+    year,
+    month,
+    navByProductForPnl,
+    migrationOpeningByProduct
+  );
+  const monthRealizedByProduct = sumRealizedPnlInMonthByProduct(
+    txsByProduct,
+    year,
+    month,
+    navByProductForPnl,
+    migrationOpeningByProduct
+  );
 
   const targetByCategory: Record<string, number> = {};
   categoryTargets.forEach((ct) => {
@@ -196,6 +221,8 @@ export async function GET() {
       yearlyOutlay: number;
       estNextShares: number | null;
     } | null;
+    /** 自然月内本产品的卖出实现 + 分红（元） */
+    monthRealizedPnl: number;
   }[] = [];
 
   let totalValue = 0;
@@ -206,19 +233,25 @@ export async function GET() {
     const rawNav = latestPriceByProduct.get(p.id);
     const navImputeLedger =
       rawNav != null && Number.isFinite(rawNav) && rawNav > 0 ? rawNav : null;
-    const { units, costBasis } = computeLedgerFromTransactions(txs, navImputeLedger);
-
     const unitsOverrideRaw = p.unitsOverride != null ? parseFloat(String(p.unitsOverride)) : null;
     const ledgerLocked = hasBuyOrSellTransactions(txs);
+    const costOverrideRaw = p.costOverride != null ? parseFloat(String(p.costOverride)) : null;
+    const migrationOpen = ledgerMigrationOpening(ledgerLocked, unitsOverrideRaw, costOverrideRaw);
+    const { units, costBasis } = computeLedgerFromTransactions(txs, navImputeLedger, migrationOpen);
+
     const cashFx = isCashCategory(p.category);
     const shareNav = usesShareTimesNavForCategory(p.category);
     const displayUnitsRaw = cashFx ? 0 : ledgerLocked ? units : unitsOverrideRaw ?? units;
     /** 现金/理财：不在总览用「份额×净值」；展示用份额列置 0（避免误用单价×份额） */
     const displayUnits = shareNav ? displayUnitsRaw : 0;
-    const costOverrideRaw = p.costOverride != null ? parseFloat(String(p.costOverride)) : null;
     const displayCost = ledgerLocked ? costBasis : costOverrideRaw ?? costBasis;
 
-    const latestPrice = latestPriceByProduct.has(p.id) ? latestPriceByProduct.get(p.id)! : null;
+    const rawLatestPrice = latestPriceByProduct.has(p.id) ? latestPriceByProduct.get(p.id)! : null;
+    /** 净值为 0/NaN 视为无有效单价，走与「无 DailyPrice」相同的占位逻辑 */
+    const latestPrice =
+      rawLatestPrice != null && Number.isFinite(rawLatestPrice) && rawLatestPrice > 0
+        ? rawLatestPrice
+        : null;
     const monthStartSnap = monthStartByProduct[p.id];
 
     const subNorm = (p.subCategory ?? "").trim();
@@ -241,7 +274,8 @@ export async function GET() {
       } else if (!shareNav) {
         /** 理财等：DailyPrice 存的是当日余额/总市值（与「更新净值」一致），非每股单价 */
         marketValue = latestPrice;
-      } else if (displayUnits > 0) {
+      } else if (displayUnits !== 0) {
+        /** 含负份额：一律 份额×净值，避免再走基金占位市值导致与份额列矛盾 */
         marketValue = marketValueFromUnitsAndNav(displayUnits, latestPrice);
       } else if (p.type !== "FUND" && p.type !== "STOCK") {
         marketValue = latestPrice;
@@ -257,6 +291,10 @@ export async function GET() {
     } else if (cashFx && displayCost > 0) {
       /** 现金：市值本应由「更新净值」/导入写入 DailyPrice（余额）；仅填总成本未录余额时，用成本占位便于总览与合计 */
       marketValue = displayCost;
+    } else if (shareNav && displayCost > 0) {
+      /** 债/商/权：尚无有效净值时，用成本占位（与理财「无净值用成本」一致），避免记一笔后只有成本、市值为 0 */
+      if (displayUnits !== 0) marketValue = displayCost;
+      else if (monthStartSnap != null && monthStartSnap > 0) marketValue = monthStartSnap;
     }
     totalValue += marketValue;
 
@@ -322,7 +360,8 @@ export async function GET() {
       account: p.account,
       riskLevel: p.riskLevel,
       units: displayUnits,
-      unitsOverride: cashFx || !shareNav ? null : ledgerLocked ? null : unitsOverrideRaw,
+      /** 有流水时仍可能保留：作为迁移期初并入流水汇总 */
+      unitsOverride: cashFx || !shareNav ? null : unitsOverrideRaw,
       hasTransactions: ledgerLocked,
       ledgerLocked,
       latestPrice,
@@ -330,13 +369,14 @@ export async function GET() {
       latestPriceDate: latestPriceDateByProduct.get(p.id) ?? null,
       marketValue,
       costBasis: displayCost,
-      costOverride: ledgerLocked ? null : costOverrideRaw,
+      costOverride: !shareNav && ledgerLocked ? null : costOverrideRaw,
       allocationPct: 0,
       monthStartValue,
       pnl1m,
       pnl1mPct,
       totalDividends,
       dca,
+      monthRealizedPnl: monthRealizedByProduct.get(p.id) ?? 0,
     });
   }
 

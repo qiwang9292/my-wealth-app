@@ -90,10 +90,10 @@ export async function GET(request: Request) {
     { header: "净值/汇率", key: "price", width: 14 },
     { header: "市值", key: "mv", width: 14 },
     { header: "总成本", key: "cost", width: 14 },
-    { header: "持仓盈亏%", key: "roi", width: 10 },
+    { header: "本周盈亏%", key: "pnl3mPct", width: 12 },
     { header: "本月盈亏%", key: "pnl1mPct", width: 12 },
-    { header: "三月盈亏%", key: "pnl3mPct", width: 12 },
-    { header: "六月盈亏%", key: "pnl6mPct", width: 12 },
+    { header: "年度盈亏%", key: "pnl6mPct", width: 12 },
+    { header: "持仓盈亏%", key: "roi", width: 10 },
   ];
 
   const headerRow = ws.getRow(1);

@@ -6,6 +6,7 @@ import Link from "next/link";
 type ClosedRow = {
   productId: string;
   name: string;
+  account?: string | null;
   category: string;
   subCategory: string | null;
   closedAt: string;
@@ -47,6 +48,21 @@ export default function ClosedProductsPage() {
     };
   }, []);
 
+  const groupedRows = Array.from(
+    rows.reduce((m, r) => {
+      const acc = (r.account ?? "").trim() || "未分配账户";
+      const list = m.get(acc);
+      if (list) list.push(r);
+      else m.set(acc, [r]);
+      return m;
+    }, new Map<string, ClosedRow[]>())
+  )
+    .map(([account, list]) => ({
+      account,
+      rows: list.sort((a, b) => (b.closedAt ?? "").localeCompare(a.closedAt ?? "")),
+    }))
+    .sort((a, b) => a.account.localeCompare(b.account, "zh-CN"));
+
   return (
     <div className="min-h-screen p-4 max-w-[1100px] mx-auto pb-16">
       <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -77,6 +93,7 @@ export default function ClosedProductsPage() {
           <table className="w-full min-w-[800px] border-collapse text-sm">
             <thead className="bg-slate-100 dark:bg-slate-800">
               <tr>
+                <th className="text-left py-2 px-2 border-b border-slate-200 dark:border-slate-600">账户</th>
                 <th className="text-left py-2 px-2 border-b border-slate-200 dark:border-slate-600">清仓日期</th>
                 <th className="text-left py-2 px-2 border-b border-slate-200 dark:border-slate-600">产品名</th>
                 <th className="text-left py-2 px-2 border-b border-slate-200 dark:border-slate-600">大类 / 细分</th>
@@ -87,30 +104,38 @@ export default function ClosedProductsPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.productId} className="border-b border-slate-100 dark:border-slate-700/80">
-                  <td className="py-2 px-2 tabular-nums whitespace-nowrap">{r.closedAt}</td>
-                  <td className="py-2 px-2">{r.name}</td>
-                  <td className="py-2 px-2 text-slate-600 dark:text-slate-400">
-                    {r.category}
-                    {r.subCategory ? ` · ${r.subCategory}` : ""}
+              {groupedRows.flatMap((g) => [
+                <tr key={`acc-${g.account}`} className="bg-slate-50 dark:bg-slate-800/70 font-medium">
+                  <td className="py-1.5 px-2" colSpan={8}>
+                    账户：{g.account}（{g.rows.length}）
                   </td>
-                  <td className="py-2 px-2 tabular-nums">{r.lastSellDate ?? "—"}</td>
-                  <td className="py-2 px-2 text-right tabular-nums">¥ {fmtMoney(r.totalSellAmount)}</td>
-                  <td
-                    className={`py-2 px-2 text-right tabular-nums font-medium ${
-                      r.realizedPnl >= 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
-                    }`}
-                  >
-                    {r.realizedPnl >= 0 ? "+" : ""}¥ {fmtMoney(r.realizedPnl)}
-                  </td>
-                  <td className="py-2 px-2">
-                    <Link href={`/products/${r.productId}`} className="text-slate-600 dark:text-slate-400 hover:underline text-xs">
-                      详情
-                    </Link>
-                  </td>
-                </tr>
-              ))}
+                </tr>,
+                ...g.rows.map((r) => (
+                  <tr key={r.productId} className="border-b border-slate-100 dark:border-slate-700/80">
+                    <td className="py-2 px-2 text-slate-500 dark:text-slate-400">↳</td>
+                    <td className="py-2 px-2 tabular-nums whitespace-nowrap">{r.closedAt}</td>
+                    <td className="py-2 px-2">{r.name}</td>
+                    <td className="py-2 px-2 text-slate-600 dark:text-slate-400">
+                      {r.category}
+                      {r.subCategory ? ` · ${r.subCategory}` : ""}
+                    </td>
+                    <td className="py-2 px-2 tabular-nums">{r.lastSellDate ?? "—"}</td>
+                    <td className="py-2 px-2 text-right tabular-nums">¥ {fmtMoney(r.totalSellAmount)}</td>
+                    <td
+                      className={`py-2 px-2 text-right tabular-nums font-medium ${
+                        r.realizedPnl >= 0 ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
+                      }`}
+                    >
+                      {r.realizedPnl >= 0 ? "+" : ""}¥ {fmtMoney(r.realizedPnl)}
+                    </td>
+                    <td className="py-2 px-2">
+                      <Link href={`/products/${r.productId}`} className="text-slate-600 dark:text-slate-400 hover:underline text-xs">
+                        详情
+                      </Link>
+                    </td>
+                  </tr>
+                )),
+              ])}
             </tbody>
           </table>
         </div>

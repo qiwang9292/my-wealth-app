@@ -18,7 +18,7 @@ export async function GET(request: Request) {
 
   const list = await prisma.transaction.findMany({
     where: Object.keys(where).length ? where : undefined,
-    include: { product: { select: { name: true, code: true } } },
+    include: { product: { select: { name: true, code: true, account: true } } },
     orderBy: { date: "desc" },
     take: 500,
   });
@@ -55,10 +55,10 @@ export async function POST(request: Request) {
     let mergedOpening = false;
 
     /**
-     * 首笔「买入」前若总览里仍有份额/总成本覆盖且无买卖流水：先写入一笔建仓买入，
+     * 首笔「买入或卖出」前若总览里仍有份额/总成本覆盖且无买卖流水：先写入一笔建仓买入，
      * 再记用户这笔，避免流水一启用就只汇总新单、把原手填持仓「冲掉」。
      */
-    if (!hadBuyOrSell && userType === "BUY") {
+    if (!hadBuyOrSell && (userType === "BUY" || userType === "SELL")) {
       const uo = product.unitsOverride != null ? Number(String(product.unitsOverride)) : null;
       const co = product.costOverride != null ? Number(String(product.costOverride)) : null;
       if (uo != null && co != null && uo > 0 && Number.isFinite(uo) && Number.isFinite(co) && co >= 0) {

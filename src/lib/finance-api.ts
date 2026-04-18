@@ -450,3 +450,113 @@ export async function fetchFundPriceAtDate(code: string, date: Date): Promise<nu
     return null;
   }
 }
+
+/** 日历 yyyy-mm-dd 加减天数（按 UTC 日期分量计算，避免夏令时干扰） */
+export function addCalendarDaysYmd(ymd: string, deltaDays: number): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd.trim());
+  if (!m) return ymd;
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const d = parseInt(m[3], 10);
+  const dt = new Date(Date.UTC(y, mo - 1, d + deltaDays));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+async function fetchFundLsjzOnePage(
+  code: string,
+  sdate: string,
+  edate: string,
+  page: number,
+  per: number
+): Promise<{ date: string; price: number }[]> {
+  const url = `https://fundf10.eastmoney.com/F10DataApi.aspx?type=lsjz&code=${code}&page=${page}&per=${per}&sdate=${sdate}&edate=${edate}`;
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": UA,
+      Referer: `https://fundf10.eastmoney.com/jjjz_${code}.html`,
+    },
+    next: { revalidate: 0 },
+  });
+  if (!res.ok) return [];
+  const text = await res.text();
+  const content = eastmoneyLsjzContentFromResponse(text);
+  return parseEastmoneyLsjzRows(content);
+}
+
+/**
+ * 基金：取「披露净值日」≥ targetYmd 的最早一条（周末/节假日无披露则自然顺延到下一有净值日）。
+ * 与 15:00 规则配合：调用方应先算出 targetYmd（当日或次一自然日）。
+ */
+export async function fetchFundNavFirstOnOrAfter(
+  code: string,
+  targetYmd: string
+): Promise<{ price: number; date: string } | null> {
+  const edate = addCalendarDaysYmd(targetYmd, 200);
+  const byDate = new Map<string, number>();
+  for (let page = 1; page <= 40; page++) {
+    const rows = await fetchFundLsjzOnePage(code, targetYmd, edate, page, 60);
+    if (rows.length === 0) break;
+    for (const r of rows) {
+      if (r.date >= targetYmd && !byDate.has(r.date)) byDate.set(r.date, r.price);
+    }
+    if (rows.length < 60) break;
+  }
+  const sorted = Array.from(byDate.entries())
+    .filter(([d]) => d >= targetYmd)
+    .sort(([a], [b]) => a.localeCompare(b));
+  if (sorted.length === 0) return null;
+  const [d, p] = sorted[0];
+  return { price: p, date: d };
+}
+
+/**
+ * A 股/ETF：取 K 线上「交易日」≥ targetYmd 的最早一天收盘价（东财日 K，f51 日期 f53 收盘）。
+ */
+export async function fetchStockCloseFirstOnOrAfter(
+  code: string,
+  targetYmd: string
+): Promise<{ price: number; date: string } | null> {
+  const secid = eastMoneySecidForCode(code);
+  if (!secid) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(targetYmd.trim());
+  if (!m) return null;
+  const y = parseInt(m[1], 10);
+  const mo = parseInt(m[2], 10);
+  const da = parseInt(m[3], 10);
+  const beg = `${y}${String(mo).padStart(2, "0")}${String(da).padStart(2, "0")}`;
+  const endDt = new Date(Date.UTC(y, mo - 1, da + 120));
+  const end = `${endDt.getUTCFullYear()}${String(endDt.getUTCMonth() + 1).padStart(2, "0")}${String(endDt.getUTCDate()).padStart(2, "0")}`;
+  const path = `api/qt/stock/kline/get?secid=${secid}&fields1=f1,f2,f3,f4&fields2=f51,f52,f53&fqt=1&klt=101&beg=${beg}&end=${end}&lmt=500&ut=fa5fd1943c7b386f172d6893dbfba10b`;
+  const hosts = ["https://push2his.eastmoney.com", "https://24.push2his.eastmoney.com"];
+  for (const h of hosts) {
+    try {
+      const res = await fetch(`${h}/${path}`, {
+        headers: { "User-Agent": UA, Referer: "https://quote.eastmoney.com/" },
+        next: { revalidate: 0 },
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as { data?: { klines?: string[] } };
+      const lines = json?.data?.klines;
+      if (!lines?.length) continue;
+      const sorted = [...lines].sort((a, b) => {
+        const da = a.split(",")[0] ?? "";
+        const db = b.split(",")[0] ?? "";
+        return da.localeCompare(db);
+      });
+      for (const line of sorted) {
+        const p = line.split(",");
+        const ds = p[0]?.trim();
+        if (!ds || ds < targetYmd) continue;
+        const closeRaw = p.length >= 3 ? p[2] : p[1];
+        const close = closeRaw != null ? parseFloat(closeRaw) : NaN;
+        if (Number.isFinite(close) && close > 0) return { price: close, date: ds };
+      }
+    } catch {
+      /* next host */
+    }
+  }
+  return null;
+}

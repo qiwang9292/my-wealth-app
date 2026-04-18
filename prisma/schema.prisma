@@ -22,13 +22,14 @@ model Product {
   maturityDate DateTime? // 理财·定期：到期日（仅展示与记录；估值仍按净值逻辑）
   costOverride Decimal?  // 手动覆盖总成本（为空则按流水计算）
   unitsOverride Decimal? // 手动覆盖份额（为空则按流水计算，便于初次输入）
-  // 定投计划（仅记录与测算，不自动生成流水；市值仍只认流水+净值）
+  // 定投计划：展示与测算见 buildDcaProjection；买入流水由「补记定投」接口按扣款日写入
   dcaEnabled     Boolean   @default(false)
   dcaAmount      Decimal? // 每期金额（元）
   dcaFrequency   String?  // DAILY_TRADING | WEEKLY | BIWEEKLY | MONTHLY
   dcaDayOfMonth  Int?     // 每月几号扣款 1–28
   dcaWeekday     Int?     // 每周几 0=周日 … 6=周六
   dcaAnchorDate  DateTime? // 双周定投锚点日（首次/对齐用）
+  dcaMaterializedThroughYmd String? // 最近一次补记定投已处理到的扣款日 yyyy-mm-dd（含）
   closedAt     DateTime? // 已清仓：总览不展示，流水与净值保留
   deletedAt    DateTime? // 误建软删：无流水才允许 API 删减
   createdAt    DateTime  @default(now())

@@ -4,9 +4,15 @@
  * 公式：pnl = 当前市值 − 月初市值 − 本月买入金额 + 本月卖出回款 + 本月现金分红
  * 月初市值 = max(0, 月初份额) × 月初净值（取当月 1 日零点之前最近一条 DailyPrice）。
  * 「本月」现金流 = 自然月内（月初 00:00～当月末）的买卖/分红，与持仓流水口径对齐。
+ * 卖出金额在库内多为负数（自动记一笔），汇总回款时用 sellProceedsCny 转为正值。
  */
 import { Prisma } from "@prisma/client";
-import { effectiveTxnQuantity, hasBuyOrSellTransactions, type LedgerTx } from "@/lib/ledger";
+import {
+  effectiveTxnQuantity,
+  hasBuyOrSellTransactions,
+  sellProceedsCny,
+  type LedgerTx,
+} from "@/lib/ledger";
 import { marketValueFromUnitsAndNav } from "@/lib/market-value";
 
 function sortTxsAsc(txs: LedgerTx[]) {
@@ -29,7 +35,8 @@ export function unitsBeforeMonthStart(
     return unitsOverride ?? 0;
   }
   const ms = monthStart.getTime();
-  let u = 0;
+  /** 有买卖流水时：总览迁移手填的份额作为月初流水推演起点 */
+  let u = unitsOverride ?? 0;
   for (const t of sortTxsAsc(txs)) {
     const d = t.date ? new Date(t.date).getTime() : 0;
     if (d >= ms) break;
@@ -63,7 +70,7 @@ export function cashFlowsInMonthWindow(
     const amt = Number(t.amount);
     if (!Number.isFinite(amt)) continue;
     if (t.type === "BUY") buy += amt;
-    else if (t.type === "SELL") sell += amt;
+    else if (t.type === "SELL") sell += sellProceedsCny(amt);
     else if (t.type === "DIVIDEND") dividend += amt;
   }
   return { buy, sell, dividend };

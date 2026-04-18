@@ -27,16 +27,18 @@ const WEEKDAY_OPTIONS: { value: number; label: string }[] = [
   { value: 6, label: "周六" },
 ];
 
-function fmtNum(n: number) {
-  return n.toLocaleString("zh-CN", { minimumFractionDigits: 0, maximumFractionDigits: 4 });
+function fmtNum(n: number | null | undefined) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  return Number(n).toLocaleString("zh-CN", { minimumFractionDigits: 0, maximumFractionDigits: 4 });
 }
-function fmtMoney(n: number) {
-  return n.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function fmtMoney(n: number | null | undefined) {
+  if (n == null || !Number.isFinite(Number(n))) return "—";
+  return Number(n).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-function fmtDate(s: string) {
+function fmtDate(s: string | null | undefined) {
   return s ? new Date(s).toLocaleDateString("zh-CN") : "—";
 }
-function fmtDateTime(s: string) {
+function fmtDateTime(s: string | null | undefined) {
   return s ? new Date(s).toLocaleString("zh-CN") : "—";
 }
 
@@ -77,6 +79,7 @@ type DetailPayload = {
     dcaDayOfMonth: number | null;
     dcaWeekday: number | null;
     dcaAnchorDate: string | null;
+    dcaMaterializedThroughYmd?: string | null;
     /** REINVEST 红利再投资 | CASH 现金分红 */
     dividendMethod?: string | null;
   };
@@ -87,6 +90,7 @@ type DetailPayload = {
     ledgerCost: number;
     displayUnits: number;
     displayCost: number;
+    migrationOpening?: { units: number; cost: number } | null;
   };
   transactions: {
     id: string;
@@ -134,6 +138,9 @@ function ProductDetailPageInner() {
   });
   const [dcaSaving, setDcaSaving] = useState(false);
   const [dcaError, setDcaError] = useState<string | null>(null);
+  const [dcaMatBusy, setDcaMatBusy] = useState(false);
+  const [dcaMatInfo, setDcaMatInfo] = useState<string | null>(null);
+  const [dcaMatFundCutoff, setDcaMatFundCutoff] = useState<"before_15" | "after_15">("before_15");
   const [dividendSaving, setDividendSaving] = useState(false);
   const [dividendError, setDividendError] = useState<string | null>(null);
 
@@ -338,6 +345,54 @@ function ProductDetailPageInner() {
       setDcaError("网络错误");
     } finally {
       setDcaSaving(false);
+    }
+  };
+
+  const runDcaMaterialize = async () => {
+    if (!id || p?.closedAt || !data?.product.dcaEnabled) return;
+    const ok = window.confirm(
+      "将把尚未补记、且不晚于今日的各期定投写成「买入」流水（每期金额按规则自动取净值/收盘价）。基金与「记一笔」一致可选择 15:00 前/后。是否继续？"
+    );
+    if (!ok) return;
+    setDcaMatBusy(true);
+    setDcaMatInfo(null);
+    try {
+      const res = await fetch("/api/dca/materialize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productId: id,
+          fundCutoff: dcaMatFundCutoff,
+        }),
+      });
+      const out = (await res.json().catch(() => ({}))) as {
+        message?: string;
+        results?: Array<
+          | { ok: true; created: number; lastMaterializedYmd: string | null }
+          | { ok: false; message: string }
+        >;
+      };
+      if (!res.ok) {
+        setDcaMatInfo(typeof out.message === "string" ? out.message : `失败（${res.status}）`);
+        return;
+      }
+      const row = out.results?.[0];
+      if (row && row.ok) {
+        setDcaMatInfo(
+          row.created > 0
+            ? `已写入 ${row.created} 笔买入流水${row.lastMaterializedYmd ? `，已处理至 ${row.lastMaterializedYmd}` : ""}。`
+            : "当前没有新的扣款日需要补记（或已全部处理到截止日）。"
+        );
+      } else if (row && !row.ok) {
+        setDcaMatInfo(row.message ?? "未能补记");
+      } else {
+        setDcaMatInfo("已完成。");
+      }
+      await loadDetail(id, false);
+    } catch {
+      setDcaMatInfo("网络错误");
+    } finally {
+      setDcaMatBusy(false);
     }
   };
 
@@ -597,9 +652,14 @@ function ProductDetailPageInner() {
             <section className="rounded-xl border border-indigo-200/80 dark:border-indigo-900/50 bg-indigo-50/40 dark:bg-indigo-950/25 p-4">
               <h2 className="text-sm font-medium text-indigo-900 dark:text-indigo-200 mb-1">定投计划</h2>
               <p className="text-xs text-indigo-800/80 dark:text-indigo-300/80 mb-3">
-                用于记录扣款周期并测算<strong>下期扣款日</strong>、<strong>约年化扣款额</strong>；与总览「市值」无关。
-                实际持仓与成本仍以<strong>流水</strong>与<strong>净值刷新</strong>为准，系统<strong>不会</strong>自动写入买入流水。
+                用于记录扣款周期并测算<strong>下期扣款日</strong>、<strong>约年化扣款额</strong>。
+                总览中的<strong>份额与成本</strong>以<strong>买入/卖出流水</strong>为准；请定期点下方「补记定投流水」，把各期扣款写成买入（基金/股票按自动取价规则），总览市值才会随持仓变化。
               </p>
+              {p.dcaMaterializedThroughYmd && (
+                <p className="text-xs text-slate-600 dark:text-slate-400 mb-2">
+                  最近一次补记已处理到：<span className="font-mono">{p.dcaMaterializedThroughYmd}</span>
+                </p>
+              )}
               {data.dcaProjection && (
                 <div className="mb-3 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-white/80 dark:bg-slate-900/60 px-3 py-2 text-sm text-slate-800 dark:text-slate-200">
                   <div className="font-medium text-indigo-900 dark:text-indigo-200 mb-1">当前测算</div>
@@ -622,6 +682,51 @@ function ProductDetailPageInner() {
                 </div>
               )}
               {dcaError && <p className="text-xs text-red-600 dark:text-red-400 mb-2">{dcaError}</p>}
+              {dcaMatInfo && (
+                <p className="text-xs text-emerald-800 dark:text-emerald-200/90 mb-2">{dcaMatInfo}</p>
+              )}
+              {p.dcaEnabled && (p.type?.toUpperCase() === "FUND" || p.type?.toUpperCase() === "STOCK") && (
+                <div className="mb-3 rounded-lg border border-indigo-200 dark:border-indigo-800 bg-white/80 dark:bg-slate-900/60 px-3 py-2 text-xs space-y-2">
+                  {p.type?.toUpperCase() === "FUND" && (
+                    <div>
+                      <div className="text-slate-600 dark:text-slate-400 mb-1">基金补记取价（与记一笔一致）</div>
+                      <div className="flex flex-col gap-1">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="dcaMatCutoff"
+                            checked={dcaMatFundCutoff === "before_15"}
+                            onChange={() => setDcaMatFundCutoff("before_15")}
+                          />
+                          <span>15:00 前</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="dcaMatCutoff"
+                            checked={dcaMatFundCutoff === "after_15"}
+                            onChange={() => setDcaMatFundCutoff("after_15")}
+                          />
+                          <span>15:00 后</span>
+                        </label>
+                      </div>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={dcaMatBusy || !p.dcaEnabled}
+                    onClick={() => void runDcaMaterialize()}
+                    className="px-3 py-1.5 rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 text-xs"
+                  >
+                    {dcaMatBusy ? "补记中…" : "补记定投流水（至今日）"}
+                  </button>
+                </div>
+              )}
+              {p.dcaEnabled && p.type?.toUpperCase() !== "FUND" && p.type?.toUpperCase() !== "STOCK" && (
+                <p className="text-xs text-amber-800 dark:text-amber-200/90 mb-2">
+                  当前产品类型无法按行情自动补记定投流水；请用「记一笔」手工买入，或调整代码/大类使类型为基金或股票。
+                </p>
+              )}
               <div className="space-y-3 text-sm">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -737,9 +842,18 @@ function ProductDetailPageInner() {
             <h2 className="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">当前持仓与总成本</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
               {pos.ledgerLocked
-                ? "该产品已有流水，份额与总成本由下方「流水」按买入/卖出汇总得出，与手填覆盖无关。"
-                : "该产品尚无流水，份额与总成本来自总览表中的手填覆盖；未填时按 0 处理。"}
+                ? pos.migrationOpening != null
+                  ? "该产品已有流水；总览里迁移时手填的份额与总成本作为「期初持仓」，再与下方流水合并计算当前份额与总成本。"
+                  : "该产品已有流水，且未再保留迁移期初手填：份额与总成本仅由下方流水按买入/卖出汇总。"
+                : "该产品尚无买卖流水，份额与总成本来自总览表中的手填覆盖；未填时按 0 处理。"}
             </p>
+            {pos.ledgerLocked &&
+              pos.displayUnits < -1e-6 &&
+              !(pos.migrationOpening ?? null) && (
+                <div className="mb-3 rounded-lg border border-amber-400/70 bg-amber-50 dark:bg-amber-950/35 px-3 py-2 text-xs text-amber-900 dark:text-amber-100 leading-relaxed">
+                  <strong>份额为负：</strong>当前没有把总览迁移数据当作期初，流水从 0 份起加减；若只有卖出会得到负数。请在总览补全该产品的<strong>份额与总成本</strong>（迁移起点），或在最早卖出之前补<strong>买入</strong>流水。首笔记<strong>买入或卖出</strong>时若当时仍有手填，系统可自动写入「建仓」流水（见记一笔说明）。
+                </div>
+              )}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
               <div>
                 <div className="text-xs text-slate-500">当前份额</div>
@@ -752,16 +866,28 @@ function ProductDetailPageInner() {
               {pos.ledgerLocked && (
                 <>
                   <div>
-                    <div className="text-xs text-slate-500">流水汇总份额</div>
+                    <div className="text-xs text-slate-500">流水净变动份额</div>
                     <div className="font-mono tabular-nums">{fmtNum(pos.ledgerUnits)}</div>
                   </div>
                   <div>
-                    <div className="text-xs text-slate-500">流水汇总总成本</div>
+                    <div className="text-xs text-slate-500">流水净变动成本</div>
                     <div className="font-mono tabular-nums">¥ {fmtMoney(pos.ledgerCost)}</div>
                   </div>
                 </>
               )}
             </div>
+            {pos.ledgerLocked && pos.migrationOpening != null && (
+              <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-600 grid grid-cols-2 sm:grid-cols-2 gap-3 text-sm">
+                <div>
+                  <div className="text-xs text-slate-500">迁移期初份额（总览手填）</div>
+                  <div className="font-mono tabular-nums">{fmtNum(pos.migrationOpening.units)}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500">迁移期初总成本（总览手填）</div>
+                  <div className="font-mono tabular-nums">¥ {fmtMoney(pos.migrationOpening.cost)}</div>
+                </div>
+              </div>
+            )}
           </section>
 
           {!pos.ledgerLocked && (

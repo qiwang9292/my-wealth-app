@@ -6,6 +6,18 @@
 
 ---
 
+## 更新日志（摘要）
+
+### 2026-03-29
+
+- **账本与本月盈亏**：买入/卖出流水**份额为 0** 但有金额时，用**流水单价**或该产品**最新净值**反算份额（`src/lib/ledger.ts`，总览/详情/瞬间/区间盈亏等共用）；`POST /api/transactions` 买入时自动补份额与单价。`cashFlowsInMonthWindow` 上界改为**当月末**（不再用「此刻」截断），避免同月较晚入账的买入未计入本月现金流、导致本月盈亏偏大。
+- **盈亏展示**：资产表「本月 / 三月 / 六月」改为**百分比**（`pnl1mPct`、`pnl3mPct`、`pnl6mPct`）；dashboard「本月盈亏（持仓）」与组合收益率统一为 **`monthPct`**（去掉重复的「本月收益 %」块）。`/api/period-pnl`：债/商/权有六位代码即参与；基金先东财 F10，失败再 **K 线**；股票/ETF 用东财 **K 线**取锚定月月末收盘；导出 `export-overview` 并行拉 period-pnl，列与页面一致。
+- **行情与刷新**：`fetchStockPrice` 新浪失败后依次 **东财 push2**、**腾讯 gtimg**；`fetchStockCloseLastInMonth` 供三月/六月推算；**商品**大类下六位代码按交易所推断为 FUND/STOCK（如 **159985 豆粕 ETF**），并纳入 **`run-refresh-prices`** 刷新范围。
+- **UI**：现金美元/日元「净值/汇率」列数字与 **JPY/USD** 同列不换行；**− 删减产品**下拉里按**账户** `optgroup`；`groupRowsByCategoryAndSub` 每个**小类**内按**市值降序**，同市值再按账户、名称。
+- **版本**：GitHub `main` 已推送 **`4b92776`**（`feat: 总览账本推算、盈亏%、ETF 多源行情与导入导出等`）；历史标签 **`v1.0`**，上一笔初始提交为 `chore: initial commit — Wealth Tracker v1.0`。
+
+---
+
 ## 任务怎么称呼（沟通约定）
 
 - 每个 Phase 下的条目按 **BUG** → **约定** → **功能** → **UI** 四类归类（与原先 backlog 习惯一致）。
@@ -118,6 +130,20 @@
 ### 功能
 
 - [ ] **大类占比 Scenario** — 输入：大类占比 + 风险偏好 + 周期；输出：解读、2～3 套 scenario（区间 + 年化表述 + reasoning）、波动提示。
+  - **前置选择（先选再算）**：在计算大类占比前，允许用户显式选择 `includeCategories[]` 或 `excludeCategories[]`（现金/债权/商品/权益）。
+  - **互斥与兜底规则**：`include` 与 `exclude` 不可同时生效；若同时传入，以 `include` 为准并返回提示。若结果导致无可用大类，阻断请求并提示用户至少保留 1 个大类。
+  - **归一化规则**：仅对最终纳入的大类重算占比（总和=100%）；被排除大类不参与占比、解读与 scenario 推导。
+  - **输入约束（工程）**：只传「四大类占比、风险偏好、投资周期、可选流动性偏好」；不传账户名、产品名、交易明细等敏感字段。
+  - **输出结构（固定 JSON）**：`summary`、`scenarios[]`、`volatilityWarning`、`disclaimer`、`generatedAt`；每个 `scenario` 含 `name`、`allocationRange`、`annualReturnRangeNote`、`reasoning`、`fitFor`、`riskPoint`。
+  - **Scenario 数量规则**：默认 3 套（稳健 / 均衡 / 进取）；当输入缺失或质量不足时降级为 2 套，并在 `summary` 明示「信息不足，已降级输出」。
+  - **区间表述约束（合规）**：只允许区间与概率语言（如「可能在 X%~Y% 波动」），禁止确定性词汇（如「必然上涨」「稳赚」）与单点收益承诺。
+  - **失败兜底**：LLM 超时/空响应/解析失败时返回规则模板（非空），包含「当前占比解读 + 1 条保守建议 + 合规免责声明」，并记录 `fallback=true`。
+  - **缓存与一致性**：缓存键包含 `inputHash + promptVersion`，同输入短期返回一致结果；响应必须带 `generatedAt` 便于前端标注时效。
+  - **接口草案**：见 `docs/ai-category-scenario-api.md`（请求体、校验、错误码、fallback、合规用语）。
+  - **验收样例（最小）**：  
+    1) 输入完整 -> 返回 3 套 scenario 且字段齐全；  
+    2) 输入缺周期 -> 返回 2 套并给出信息不足提示；  
+    3) 强制超时 -> 命中 fallback，前端可读且含免责声明。
 - [ ] **双瞬间 AI 对比** — 输入：两瞬间总资产/大类/产品变动/区间盈亏；输出：摘要、优缺点、≤3 条建议。接口：`POST /api/ai/snapshot-compare`（异步）+ `GET .../{jobId}`；缓存键含 `promptVersion`。
 - [ ] **单产品 AI 复盘** — 净值 + 流水 + 时长；表现分解、操作习惯、风险与改进；不做价格预测。
 

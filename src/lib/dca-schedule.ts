@@ -22,8 +22,70 @@ export function dcaWeekdayLabel(wd: number | null | undefined): string {
   return WEEKDAY_LABELS[wd] ?? "";
 }
 
-function startOfLocalDay(d: Date): Date {
+export function startOfLocalDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+export function addLocalDays(d: Date, n: number): Date {
+  const x = startOfLocalDay(d);
+  return new Date(x.getFullYear(), x.getMonth(), x.getDate() + n);
+}
+
+export function ymdFromLocalDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function parseYmdToLocalDate(s: string): Date {
+  const [y, m, d] = s.split("-").map((x) => Number(x));
+  return new Date(y, m - 1, d);
+}
+
+const DCA_MATERIALIZE_MAX = 260;
+
+/**
+ * 枚举「上次已补记日」之后、截止日（含）内的各期扣款日（本地日历），与 nextDcaOccurrence 口径一致。
+ */
+export function enumerateDcaDueDatesBetween(
+  p: DcaProductFields,
+  opts: {
+    materializedThroughYmd: string | null | undefined;
+    planStart: Date;
+    throughYmd: string;
+    maxOccurrences?: number;
+  }
+): string[] {
+  if (!p.dcaEnabled || !isDcaFrequency(p.dcaFrequency)) return [];
+  const amt = p.dcaAmount != null ? Number(String(p.dcaAmount)) : NaN;
+  if (!Number.isFinite(amt) || amt <= 0) return [];
+
+  const freq = p.dcaFrequency;
+  const throughYmd = opts.throughYmd.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(throughYmd)) return [];
+
+  const max = opts.maxOccurrences ?? DCA_MATERIALIZE_MAX;
+  const mat = (opts.materializedThroughYmd ?? "").trim();
+  let cursor =
+    mat && /^\d{4}-\d{2}-\d{2}$/.test(mat)
+      ? addLocalDays(parseYmdToLocalDate(mat), 1)
+      : startOfLocalDay(opts.planStart);
+
+  const out: string[] = [];
+  let guard = 0;
+  while (out.length < max && guard++ < 500) {
+    const next = nextDcaOccurrence({
+      frequency: freq,
+      dayOfMonth: p.dcaDayOfMonth,
+      weekday: p.dcaWeekday,
+      anchorDate: p.dcaAnchorDate,
+      from: cursor,
+    });
+    if (!next) break;
+    const ymd = ymdFromLocalDate(next);
+    if (ymd > throughYmd) break;
+    out.push(ymd);
+    cursor = addLocalDays(next, 1);
+  }
+  return out;
 }
 
 /** 近似交易日：本地周一至周五（不剔除法定节假日） */

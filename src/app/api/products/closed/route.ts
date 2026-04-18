@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { sumLifetimeRealizedPnl } from "@/lib/ledger";
+import { hasBuyOrSellTransactions, ledgerMigrationOpening, sumLifetimeRealizedPnl } from "@/lib/ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -51,10 +51,15 @@ export async function GET() {
     }));
     const nav = latestNavByProduct.get(p.id);
     const navImpute = nav != null && Number.isFinite(nav) && nav > 0 ? nav : null;
-    const realizedPnl = sumLifetimeRealizedPnl(ledgerTxs, navImpute);
+    const ledgerLocked = hasBuyOrSellTransactions(ledgerTxs);
+    const uo = p.unitsOverride != null ? Number(String(p.unitsOverride)) : null;
+    const co = p.costOverride != null ? Number(String(p.costOverride)) : null;
+    const migrationOpen = ledgerMigrationOpening(ledgerLocked, uo, co);
+    const realizedPnl = sumLifetimeRealizedPnl(ledgerTxs, navImpute, migrationOpen);
     return {
       productId: p.id,
       name: p.name,
+      account: p.account,
       category: p.category,
       subCategory: p.subCategory,
       closedAt: p.closedAt!.toISOString().slice(0, 10),
