@@ -7,6 +7,7 @@ import { CATEGORY_ORDER, getSubCategories, usesShareTimesNavForCategory } from "
 import { normalizeProductMeta } from "@/lib/product-meta";
 import { syncProductMaturityDate } from "@/lib/sync-product-maturity";
 import { persistSnapshot } from "@/lib/valuation-snapshot";
+import { requireUser } from "@/lib/auth/require-user";
 
 type ParsedRow = {
   sourceRow: number;
@@ -220,6 +221,7 @@ function dedupeKey(row: ParsedRow): string {
 }
 
 async function resolveProductCandidates(
+  userId: string,
   name: string,
   account: string | null,
   code: string | null
@@ -227,7 +229,7 @@ async function resolveProductCandidates(
   const or: Array<Record<string, unknown>> = [];
   if (code?.trim()) or.push({ code: code.trim() });
   or.push({ name, account });
-  return prisma.product.findMany({ where: { OR: or } });
+  return prisma.product.findMany({ where: { userId, OR: or } });
 }
 
 function pickMatch(candidates: Product[]): {
@@ -281,6 +283,10 @@ export async function POST(request: Request) {
 }
 
 async function handleImportExcelPost(request: Request): Promise<Response> {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const form = await request.formData();
   const file = form.get("file");
   const actionRaw = String(form.get("action") ?? "import").trim().toLowerCase();
@@ -433,7 +439,7 @@ async function handleImportExcelPost(request: Request): Promise<Response> {
     }
     seenKeys.add(key);
 
-    const candidates = await resolveProductCandidates(row.name, account, code);
+    const candidates = await resolveProductCandidates(userId, row.name, account, code);
     const { kind, product } = pickMatch(candidates);
 
     const payload = {
@@ -496,7 +502,7 @@ async function handleImportExcelPost(request: Request): Promise<Response> {
 
     if (code) {
       const codeOwner = await prisma.product.findFirst({
-        where: { code, deletedAt: null, closedAt: null },
+        where: { userId, code, deletedAt: null, closedAt: null },
       });
       const sameAccount = codeOwner != null && (codeOwner.account ?? "") === (account ?? "");
       if (sameAccount) {
@@ -605,22 +611,26 @@ async function handleImportExcelPost(request: Request): Promise<Response> {
 
     const { payload, row, existed, applyPosition } = plan;
     const { maturityDate: maturitySync, ...productFields } = payload;
-    const data: Parameters<typeof prisma.product.create>[0]["data"] = { ...productFields };
-    if (applyPosition) {
-      if (!existed) {
-        data.unitsOverride = applyPosition.unitsOverride;
-        data.costOverride = applyPosition.costOverride;
-      } else {
+
+    let product: Product;
+    if (existed) {
+      const data: Prisma.ProductUpdateInput = { ...productFields };
+      if (applyPosition) {
         const txCount = await prisma.transaction.count({ where: { productId: existed.id } });
         if (txCount === 0) {
           data.unitsOverride = applyPosition.unitsOverride;
           data.costOverride = applyPosition.costOverride;
         }
       }
+      product = await prisma.product.update({ where: { id: existed.id }, data });
+    } else {
+      const data: Prisma.ProductUncheckedCreateInput = { ...productFields, userId };
+      if (applyPosition) {
+        data.unitsOverride = applyPosition.unitsOverride;
+        data.costOverride = applyPosition.costOverride;
+      }
+      product = await prisma.product.create({ data });
     }
-    const product = existed
-      ? await prisma.product.update({ where: { id: existed.id }, data })
-      : await prisma.product.create({ data });
 
     await syncProductMaturityDate(prisma, product.id, maturitySync);
 
@@ -641,7 +651,7 @@ async function handleImportExcelPost(request: Request): Promise<Response> {
   let snapshotId: string | null = null;
   if (action === "import" && created + updated > 0) {
     try {
-      const snap = await persistSnapshot(prisma, today, "Excel 导入自动生成");
+      const snap = await persistSnapshot(prisma, today, "Excel 导入自动生成", userId);
       snapshotId = snap.id;
     } catch (e) {
       console.error("[import-excel] 导入后自动拍瞬间失败", e);

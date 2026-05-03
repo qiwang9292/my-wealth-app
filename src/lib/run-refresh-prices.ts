@@ -4,13 +4,14 @@ import { isJicunGoldProductName } from "@/lib/jicun-gold";
 import { inferProductType } from "@/lib/infer-product-type";
 
 export type RefreshPricesOptions = {
+  userId: string;
   productIds?: string[];
   category?: string;
 };
 
 export async function runRefreshPrices(
   prismaClient: PrismaClient,
-  options?: RefreshPricesOptions
+  options: RefreshPricesOptions
 ): Promise<{
   updated: number;
   codeFilled: number;
@@ -18,11 +19,12 @@ export async function runRefreshPrices(
   total: number;
   category: string | null;
 }> {
-  const categoryFilter = options?.category?.trim() || undefined;
-  const productIds = options?.productIds?.length ? options.productIds : undefined;
+  const categoryFilter = options.category?.trim() || undefined;
+  const productIds = options.productIds?.length ? options.productIds : undefined;
 
   const products = await prismaClient.product.findMany({
     where: {
+      userId: options.userId,
       deletedAt: null,
       closedAt: null,
       ...(categoryFilter || productIds?.length

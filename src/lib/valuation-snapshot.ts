@@ -25,28 +25,29 @@ export type SnapshotLineItem = {
 
 /**
  * @param snapshotDate 瞬间日期（写入 Snapshot.snapshotDate）
- * @param prismaClient 默认 prisma
+ * @param userId 数据归属用户
  */
 export async function buildSnapshotLineItems(
   prismaClient: PrismaClient,
-  snapshotDate: Date
+  snapshotDate: Date,
+  userId: string
 ): Promise<{ items: SnapshotLineItem[]; totalValue: number }> {
   try {
     await prismaClient.$transaction([
       prismaClient.product.updateMany({
-        where: { category: "美元" },
+        where: { category: "美元", userId },
         data: { category: "现金", subCategory: "美元" },
       }),
       prismaClient.product.updateMany({
-        where: { category: "日元" },
+        where: { category: "日元", userId },
         data: { category: "现金", subCategory: "日元" },
       }),
       prismaClient.product.updateMany({
-        where: { account: "美元" },
+        where: { account: "美元", userId },
         data: { category: "现金", subCategory: "美元" },
       }),
       prismaClient.product.updateMany({
-        where: { account: "日元" },
+        where: { account: "日元", userId },
         data: { category: "现金", subCategory: "日元" },
       }),
     ]);
@@ -61,19 +62,24 @@ export async function buildSnapshotLineItems(
     console.error("[valuation-snapshot] 汇率拉取失败", e);
   }
 
-  const activeProductWhere = { deletedAt: null, closedAt: null };
+  const activeProductWhere = { deletedAt: null, closedAt: null, userId };
 
   const snapYear = snapshotDate.getFullYear();
   const snapMonth = snapshotDate.getMonth();
 
-  const [products, monthStartSnapshot, allTransactions] = await Promise.all([
-    prismaClient.product.findMany({
-      where: activeProductWhere,
-      orderBy: [{ account: "asc" }, { category: "asc" }, { name: "asc" }],
-    }),
-    pickMonthBaselineSnapshot(prismaClient, snapYear, snapMonth),
-    prismaClient.transaction.findMany({ orderBy: { date: "asc" } }),
-  ]);
+  const products = await prismaClient.product.findMany({
+    where: activeProductWhere,
+    orderBy: [{ account: "asc" }, { category: "asc" }, { name: "asc" }],
+  });
+  const ids = products.map((p) => p.id);
+
+  const monthStartSnapshot = await pickMonthBaselineSnapshot(prismaClient, snapYear, snapMonth, userId);
+  const allTransactions = ids.length
+    ? await prismaClient.transaction.findMany({
+        where: { productId: { in: ids } },
+        orderBy: { date: "asc" },
+      })
+    : [];
 
   const txsByProduct = new Map<string, typeof allTransactions>();
   for (const t of allTransactions) {
@@ -84,20 +90,23 @@ export async function buildSnapshotLineItems(
 
   const latestPriceByProduct = new Map<string, number>();
   try {
-    const rows = await prismaClient.$queryRaw<Array<{ productId: string; price: unknown }>>(
-      Prisma.sql`
-        SELECT d1.productId, d1.price
-        FROM DailyPrice d1
-        INNER JOIN (
-          SELECT productId, MAX(date) AS md FROM DailyPrice GROUP BY productId
-        ) x ON d1.productId = x.productId AND d1.date = x.md
-      `
-    );
-    for (const r of rows) {
-      latestPriceByProduct.set(r.productId, Number(String(r.price)));
+    if (ids.length) {
+      const rows = await prismaClient.$queryRaw<Array<{ productId: string; price: unknown }>>(
+        Prisma.sql`
+          SELECT d1."productId", d1.price
+          FROM "DailyPrice" d1
+          INNER JOIN (
+            SELECT "productId", MAX(date) AS md FROM "DailyPrice"
+            WHERE "productId" IN (${Prisma.join(ids)})
+            GROUP BY "productId"
+          ) x ON d1."productId" = x."productId" AND d1.date = x.md
+        `
+      );
+      for (const r of rows) {
+        latestPriceByProduct.set(r.productId, Number(String(r.price)));
+      }
     }
   } catch {
-    const ids = products.map((p) => p.id);
     if (ids.length) {
       const fallback = await prismaClient.dailyPrice.findMany({
         where: { productId: { in: ids } },
@@ -246,11 +255,13 @@ export async function buildSnapshotLineItems(
 export async function persistSnapshot(
   prismaClient: PrismaClient,
   snapshotDate: Date,
-  note: string | null
+  note: string | null,
+  userId: string
 ) {
-  const { items, totalValue } = await buildSnapshotLineItems(prismaClient, snapshotDate);
+  const { items, totalValue } = await buildSnapshotLineItems(prismaClient, snapshotDate, userId);
   const snap = await prismaClient.snapshot.create({
     data: {
+      userId,
       snapshotDate,
       note: note ?? null,
       items: {

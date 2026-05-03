@@ -4,56 +4,85 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String              @id @default(cuid())
+  email              String              @unique
+  passwordHash       String
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  products           Product[]
+  categoryTargets    CategoryTarget[]
+  snapshots          Snapshot[]
+  passwordResetCodes PasswordResetCode[]
+}
+
+model PasswordResetCode {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 model Product {
   id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   name         String
-  code         String? // 同一基金可在不同账户各建一条产品，故不做全局唯一
-  type         String    @default("OTHER") // FUND | STOCK | FIXED | WEALTH | OTHER
-  category     String    @default("权益") // 大类见 src/lib/categories.ts CATEGORY_ORDER
-  subCategory  String?   // 小类，随大类联动，见 categories.ts SUB_BY_CATEGORY
-  account      String?   // 账户：招商银行、交通银行、天天基金等
-  riskLevel    String?   // R1-R5
-  // 基金分红方式（仅记录）：REINVEST 红利再投资 | CASH 现金分红；不改变流水与估值逻辑
+  code         String?
+  type         String    @default("OTHER")
+  category     String    @default("权益")
+  subCategory  String?
+  account      String?
+  riskLevel    String?
   dividendMethod String?
-  maturityDate DateTime? // 理财·定期：到期日（仅展示与记录；估值仍按净值逻辑）
-  costOverride Decimal?  // 手动覆盖总成本（为空则按流水计算）
-  unitsOverride Decimal? // 手动覆盖份额（为空则按流水计算，便于初次输入）
-  // 定投计划：展示与测算见 buildDcaProjection；买入流水由「补记定投」接口按扣款日写入
+  maturityDate DateTime?
+  costOverride Decimal?
+  unitsOverride Decimal?
   dcaEnabled     Boolean   @default(false)
-  dcaAmount      Decimal? // 每期金额（元）
-  dcaFrequency   String?  // DAILY_TRADING | WEEKLY | BIWEEKLY | MONTHLY
-  dcaDayOfMonth  Int?     // 每月几号扣款 1–28
-  dcaWeekday     Int?     // 每周几 0=周日 … 6=周六
-  dcaAnchorDate  DateTime? // 双周定投锚点日（首次/对齐用）
-  dcaMaterializedThroughYmd String? // 最近一次补记定投已处理到的扣款日 yyyy-mm-dd（含）
-  closedAt     DateTime? // 已清仓：总览不展示，流水与净值保留
-  deletedAt    DateTime? // 误建软删：无流水才允许 API 删减
+  dcaAmount      Decimal?
+  dcaFrequency   String?
+  dcaDayOfMonth  Int?
+  dcaWeekday     Int?
+  dcaAnchorDate  DateTime?
+  dcaMaterializedThroughYmd String?
+  closedAt     DateTime?
+  deletedAt    DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   transactions   Transaction[]
-  dailyPrices     DailyPrice[]
-  snapshotItems   SnapshotItem[]
+  dailyPrices    DailyPrice[]
+  snapshotItems  SnapshotItem[]
+
+  @@index([userId])
+  @@index([userId, deletedAt, closedAt])
 }
 
-// 资产大类目标占比（仅大类有目标%，产品无）
 model CategoryTarget {
   id                  String   @id @default(cuid())
-  category            String   @unique // 现金 | 债券 | 商品 | 权益
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category            String
   targetAllocationPct Decimal
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
+
+  @@unique([userId, category])
 }
 
 model Transaction {
   id        String   @id @default(cuid())
   productId String
   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
-  type      String   // BUY | SELL | DIVIDEND
+  type      String
   date      DateTime
   quantity  Decimal  @default(0)
   price     Decimal?
@@ -78,11 +107,16 @@ model DailyPrice {
 
 model Snapshot {
   id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   snapshotDate DateTime
   createdAt    DateTime @default(now())
   note         String?  @default("")
 
   items SnapshotItem[]
+
+  @@index([userId])
+  @@index([userId, snapshotDate])
 }
 
 model SnapshotItem {

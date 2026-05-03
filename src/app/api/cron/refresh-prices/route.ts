@@ -16,6 +16,12 @@ export async function GET(request: Request) {
     return NextResponse.json({ message: "Unauthorized" }, { status: 401 });
   }
 
-  const result = await runRefreshPrices(prisma);
-  return NextResponse.json({ ok: true, ...result });
+  const users = await prisma.user.findMany({ select: { id: true } });
+  const results: Array<{ userId: string } & Awaited<ReturnType<typeof runRefreshPrices>>> = [];
+  for (const u of users) {
+    const result = await runRefreshPrices(prisma, { userId: u.id });
+    results.push({ userId: u.id, ...result });
+  }
+
+  return NextResponse.json({ ok: true, usersProcessed: users.length, results });
 }

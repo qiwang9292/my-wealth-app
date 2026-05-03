@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { requireUser } from "@/lib/auth/require-user";
 
 /** GET：当前所有未删除产品中出现过的账户名（去重排序），供下拉选择 */
 export async function GET() {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const rows = await prisma.product.findMany({
-    where: { deletedAt: null },
+    where: { userId, deletedAt: null },
     select: { account: true },
   });
   const set = new Set<string>();

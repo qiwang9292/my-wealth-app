@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireUser } from "@/lib/auth/require-user";
 
 type ProductLite = {
   id: string;
@@ -279,6 +280,9 @@ async function llmParse(text: string, products: ProductLite[]): Promise<ParseRes
 }
 
 export async function POST(req: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+
   try {
     const body = await req.json().catch(() => null);
     if (!isObj(body)) {

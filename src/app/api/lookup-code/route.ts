@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 import { lookupCodeByName } from "@/lib/finance-api";
+import { requireUser } from "@/lib/auth/require-user";
 
 /** 根据产品名称查询基金/代码：先查本地兜底表，再走东方财富搜索 */
 export async function GET(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+
   const { searchParams } = new URL(request.url);
   const name = searchParams.get("name")?.trim();
   if (!name) {

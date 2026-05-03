@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { runDcaMaterializeInTransaction } from "@/lib/run-dca-materialize";
+import { requireUser } from "@/lib/auth/require-user";
 
 export const dynamic = "force-dynamic";
 
@@ -25,6 +25,10 @@ function todayYmdLocal(): string {
  * 仅处理未清仓、未删除产品；仅权益/债权/商品下的基金或股票。
  */
 export async function POST(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const body = (await request.json().catch(() => ({}))) as Body;
   const productId = typeof body.productId === "string" ? body.productId.trim() : "";
   const throughRaw = typeof body.throughDate === "string" ? body.throughDate.trim() : "";
@@ -34,6 +38,7 @@ export async function POST(request: Request) {
   const skipDaysWithoutNav = body.skipDaysWithoutNav !== false;
 
   const where = {
+    userId,
     deletedAt: null,
     closedAt: null,
     dcaEnabled: true,
@@ -42,10 +47,16 @@ export async function POST(request: Request) {
 
   const products = await prisma.product.findMany({ where });
 
-  /** 旧 Prisma Client 可能不把新列映射进模型；用原生查询合并，避免重复补记同一天 */
-  const matRows = await prisma.$queryRaw<Array<{ id: string; dcaMaterializedThroughYmd: string | null }>>(
-    Prisma.sql`SELECT id, dcaMaterializedThroughYmd FROM Product WHERE deletedAt IS NULL AND closedAt IS NULL AND dcaEnabled = 1`
-  );
+  const matRows = await prisma.product.findMany({
+    where: {
+      userId,
+      deletedAt: null,
+      closedAt: null,
+      dcaEnabled: true,
+      ...(productId ? { id: productId } : {}),
+    },
+    select: { id: true, dcaMaterializedThroughYmd: true },
+  });
   const matMap = new Map(matRows.map((r) => [r.id, r.dcaMaterializedThroughYmd]));
 
   const results: Array<

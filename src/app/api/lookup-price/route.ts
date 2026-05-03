@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
 import { fetchLatestPrice } from "@/lib/finance-api";
+import { requireUser } from "@/lib/auth/require-user";
 
 /**
  * GET：按代码拉取最新基金净值或股票价（不写库，供导入补全等场景）
  * query: code（必填）, type（FUND | STOCK，默认按代码粗判：6 位数字视为基金）
  */
 export async function GET(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code")?.trim();
   if (!code) {

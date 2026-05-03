@@ -475,11 +475,19 @@ function HomeInner() {
     volatilityWarning?: string;
     disclaimer?: string;
   } | null>(null);
+  const [sessionEmail, setSessionEmail] = useState<string | null>(null);
 
   useEffect(() => {
     const a = searchParams.get("account")?.trim();
     if (a) setAccountFilter(a);
   }, [searchParams]);
+
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((u: { email?: string } | null) => setSessionEmail(typeof u?.email === "string" ? u.email : null))
+      .catch(() => setSessionEmail(null));
+  }, []);
 
   const load = async () => {
     dataLoadedRef.current = false;
@@ -1187,7 +1195,24 @@ function HomeInner() {
             </span>
           )}
         </h1>
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex flex-wrap items-center gap-3 text-sm">
+          {sessionEmail && (
+            <span className="text-slate-500 dark:text-slate-400 truncate max-w-[200px]" title={sessionEmail}>
+              {sessionEmail}
+            </span>
+          )}
+          <button
+            type="button"
+            className="text-sky-600 dark:text-sky-400 hover:underline"
+            onClick={() => {
+              void fetch("/api/auth/logout", { method: "POST" }).then(() => {
+                window.location.href = "/login";
+              });
+            }}
+          >
+            退出
+          </button>
+          <span className="text-slate-400 hidden sm:inline">|</span>
           <span className="text-slate-500">账户筛选</span>
           <select
             value={accountFilter}

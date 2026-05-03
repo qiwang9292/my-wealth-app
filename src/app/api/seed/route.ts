@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { CATEGORY_ORDER, DEFAULT_TARGET_PCT_BY_CATEGORY } from "@/lib/categories";
+import { requireUser } from "@/lib/auth/require-user";
 
 /** Excel 表格结构：账户 | 财产类型 | 产品 | 风险级别 | 数额。导入为 Product + 当日净值(数额)。 */
 const EXCEL_ROWS: { account: string; assetType: string; name: string; riskLevel: string; amount: number }[] = [
@@ -57,27 +59,30 @@ function inferCategoryAndSub(row: (typeof EXCEL_ROWS)[0]): { category: string; s
 }
 
 export async function POST() {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const now = new Date();
 
-  await prisma.categoryTarget.deleteMany({});
+  await prisma.snapshot.deleteMany({ where: { userId } });
+  await prisma.categoryTarget.deleteMany({ where: { userId } });
+  await prisma.product.deleteMany({ where: { userId } });
+
   await prisma.categoryTarget.createMany({
     data: CATEGORY_ORDER.map((category) => ({
+      userId,
       category,
-      targetAllocationPct: DEFAULT_TARGET_PCT_BY_CATEGORY[category],
+      targetAllocationPct: new Prisma.Decimal(String(DEFAULT_TARGET_PCT_BY_CATEGORY[category])),
     })),
   });
-
-  await prisma.dailyPrice.deleteMany({});
-  await prisma.transaction.deleteMany({});
-  await prisma.snapshotItem.deleteMany({});
-  await prisma.snapshot.deleteMany({});
-  await prisma.product.deleteMany({});
 
   for (const row of EXCEL_ROWS) {
     const type = row.assetType === "理财" ? "WEALTH" : "FUND";
     const { category, subCategory } = inferCategoryAndSub(row);
     const p = await prisma.product.create({
       data: {
+        userId,
         name: row.name,
         code: null,
         type,
@@ -99,7 +104,7 @@ export async function POST() {
   const year = now.getFullYear();
   const month = now.getMonth();
   const firstDay = new Date(year, month, 1);
-  const products = await prisma.product.findMany();
+  const products = await prisma.product.findMany({ where: { userId } });
   const items: { productId: string; units: number; unitPrice: number; totalValue: number; costBasis: number }[] = [];
   let totalValue = 0;
   for (const p of products) {
@@ -114,6 +119,7 @@ export async function POST() {
   }
   await prisma.snapshot.create({
     data: {
+      userId,
       snapshotDate: firstDay,
       note: "月初快照（Excel 导入日）",
       items: {

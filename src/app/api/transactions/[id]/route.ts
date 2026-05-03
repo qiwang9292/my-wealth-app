@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { requireUser } from "@/lib/auth/require-user";
 
 export async function PATCH(request: Request, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const { id } = await ctx.params;
   if (!id) return NextResponse.json({ message: "缺少 id" }, { status: 400 });
 
-  const existing = await prisma.transaction.findUnique({ where: { id } });
+  const existing = await prisma.transaction.findFirst({
+    where: { id, product: { userId } },
+  });
   if (!existing) return NextResponse.json({ message: "流水不存在" }, { status: 404 });
 
   const body = await request.json().catch(() => ({}));
@@ -81,10 +88,16 @@ export async function PATCH(request: Request, ctx: { params: Promise<{ id: strin
 }
 
 export async function DELETE(_request: Request, ctx: { params: Promise<{ id: string }> }) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const { id } = await ctx.params;
   if (!id) return NextResponse.json({ message: "缺少 id" }, { status: 400 });
 
-  const existing = await prisma.transaction.findUnique({ where: { id } });
+  const existing = await prisma.transaction.findFirst({
+    where: { id, product: { userId } },
+  });
   if (!existing) return NextResponse.json({ message: "流水不存在" }, { status: 404 });
 
   await prisma.transaction.delete({ where: { id } });

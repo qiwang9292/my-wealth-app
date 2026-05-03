@@ -7,15 +7,25 @@ import { inferProductType } from "@/lib/infer-product-type";
 import { normalizeProductMeta } from "@/lib/product-meta";
 import { isOrderDateYmd, resolveBuySingleSide } from "@/lib/resolve-buy-single-side";
 import { syncProductMaturityDate } from "@/lib/sync-product-maturity";
+import { requireUser } from "@/lib/auth/require-user";
 
 const activeWhere = { deletedAt: null, closedAt: null };
 
 export async function GET() {
-  const products = await prisma.product.findMany({ where: activeWhere, orderBy: { name: "asc" } });
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const products = await prisma.product.findMany({
+    where: { ...activeWhere, userId: auth.userId },
+    orderBy: { name: "asc" },
+  });
   return NextResponse.json(products);
 }
 
 export async function POST(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const body = await request.json();
   const {
     name,
@@ -172,6 +182,7 @@ export async function POST(request: Request) {
 
   const product = await prisma.product.create({
     data: {
+      userId,
       name: String(name ?? "").trim() || "",
       code: effectiveCode,
       type,

@@ -23,6 +23,7 @@ import { buildDcaProjection } from "@/lib/dca-schedule";
 import { marketValueFromUnitsAndNav } from "@/lib/market-value";
 import { pickMonthBaselineSnapshot } from "@/lib/month-baseline-snapshot";
 import { computeShareNavMonthRowPnl } from "@/lib/sharenav-month-pnl";
+import { requireUser } from "@/lib/auth/require-user";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +31,10 @@ const RISK_WEIGHT: Record<string, number> = { R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 
 
 /** 批量拉取流水、最新净值，避免每个产品各查两次导致首屏极慢 */
 export async function GET() {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();
@@ -39,19 +44,19 @@ export async function GET() {
   try {
     await prisma.$transaction([
       prisma.product.updateMany({
-        where: { category: "美元" },
+        where: { category: "美元", userId },
         data: { category: "现金", subCategory: "美元" },
       }),
       prisma.product.updateMany({
-        where: { category: "日元" },
+        where: { category: "日元", userId },
         data: { category: "现金", subCategory: "日元" },
       }),
       prisma.product.updateMany({
-        where: { account: "美元" },
+        where: { account: "美元", userId },
         data: { category: "现金", subCategory: "美元" },
       }),
       prisma.product.updateMany({
-        where: { account: "日元" },
+        where: { account: "日元", userId },
         data: { category: "现金", subCategory: "日元" },
       }),
     ]);
@@ -64,29 +69,42 @@ export async function GET() {
     console.error("[overview] 汇率拉取失败", e);
   }
 
-  const activeProductWhere = { deletedAt: null, closedAt: null };
+  const activeProductWhere = { deletedAt: null, closedAt: null, userId };
 
-  const [products, categoryTargets, allTransactions, monthStartSnapshot, navStartRows] = await Promise.all([
-    prisma.product.findMany({
-      where: activeProductWhere,
-      orderBy: [{ account: "asc" }, { category: "asc" }, { name: "asc" }],
-    }),
-    prisma.categoryTarget.findMany(),
-    prisma.transaction.findMany({ orderBy: { date: "asc" } }),
-    pickMonthBaselineSnapshot(prisma, year, month),
-    prisma.$queryRaw<Array<{ productId: string; price: unknown }>>(
-      Prisma.sql`
-        SELECT d1.productId, d1.price
-        FROM DailyPrice d1
-        INNER JOIN (
-          SELECT productId, MAX(date) AS md
-          FROM DailyPrice
-          WHERE date < ${firstDay}
-          GROUP BY productId
-        ) x ON d1.productId = x.productId AND d1.date = x.md
-      `
-    ).catch(() => [] as Array<{ productId: string; price: unknown }>),
+  const products = await prisma.product.findMany({
+    where: activeProductWhere,
+    orderBy: [{ account: "asc" }, { category: "asc" }, { name: "asc" }],
+  });
+  const ids = products.map((p) => p.id);
+
+  let navStartRows: Array<{ productId: string; price: unknown }> = [];
+  if (ids.length) {
+    navStartRows = await prisma
+      .$queryRaw<Array<{ productId: string; price: unknown }>>(
+        Prisma.sql`
+          SELECT d1."productId", d1.price
+          FROM "DailyPrice" d1
+          INNER JOIN (
+            SELECT "productId", MAX(date) AS md
+            FROM "DailyPrice"
+            WHERE date < ${firstDay} AND "productId" IN (${Prisma.join(ids)})
+            GROUP BY "productId"
+          ) x ON d1."productId" = x."productId" AND d1.date = x.md
+        `
+      )
+      .catch(() => [] as Array<{ productId: string; price: unknown }>);
+  }
+
+  const [categoryTargets, monthStartSnapshot] = await Promise.all([
+    prisma.categoryTarget.findMany({ where: { userId }, orderBy: { category: "asc" } }),
+    pickMonthBaselineSnapshot(prisma, year, month, userId),
   ]);
+  const allTransactions = ids.length
+    ? await prisma.transaction.findMany({
+        where: { productId: { in: ids } },
+        orderBy: { date: "asc" },
+      })
+    : [];
 
   const navStartByProduct = new Map<string, number>();
   for (const r of navStartRows) {
@@ -109,18 +127,22 @@ export async function GET() {
     if (!Number.isNaN(pd.getTime())) latestPriceDateByProduct.set(productId, pd.toISOString().slice(0, 10));
   }
   try {
-    const rows = await prisma.$queryRaw<Array<{ productId: string; price: unknown; priceDate: unknown }>>(
-      Prisma.sql`
-        SELECT d1.productId, d1.price, d1.date AS priceDate
-        FROM DailyPrice d1
-        INNER JOIN (
-          SELECT productId, MAX(date) AS md FROM DailyPrice GROUP BY productId
-        ) x ON d1.productId = x.productId AND d1.date = x.md
-      `
-    );
-    for (const r of rows) {
-      latestPriceByProduct.set(r.productId, Number(String(r.price)));
-      setPriceDate(r.productId, r.priceDate);
+    if (ids.length) {
+      const rows = await prisma.$queryRaw<Array<{ productId: string; price: unknown; priceDate: unknown }>>(
+        Prisma.sql`
+          SELECT d1."productId", d1.price, d1.date AS "priceDate"
+          FROM "DailyPrice" d1
+          INNER JOIN (
+            SELECT "productId", MAX(date) AS md FROM "DailyPrice"
+            WHERE "productId" IN (${Prisma.join(ids)})
+            GROUP BY "productId"
+          ) x ON d1."productId" = x."productId" AND d1.date = x.md
+        `
+      );
+      for (const r of rows) {
+        latestPriceByProduct.set(r.productId, Number(String(r.price)));
+        setPriceDate(r.productId, r.priceDate);
+      }
     }
   } catch {
     /* 表名异常时退回：仅查当前产品 id 列表（仍可能慢，但优于全表） */

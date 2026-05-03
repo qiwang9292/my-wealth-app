@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { runRefreshPrices } from "@/lib/run-refresh-prices";
+import { requireUser } from "@/lib/auth/require-user";
 
 /**
  * POST：一键刷新净值
@@ -10,6 +11,10 @@ import { runRefreshPrices } from "@/lib/run-refresh-prices";
  * - body 可选：{ productIds }、{ category }
  */
 export async function POST(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   let productIds: string[] | undefined;
   let categoryFilter: string | undefined;
   try {
@@ -22,6 +27,6 @@ export async function POST(request: Request) {
     categoryFilter = undefined;
   }
 
-  const result = await runRefreshPrices(prisma, { productIds, category: categoryFilter });
+  const result = await runRefreshPrices(prisma, { userId, productIds, category: categoryFilter });
   return NextResponse.json(result);
 }

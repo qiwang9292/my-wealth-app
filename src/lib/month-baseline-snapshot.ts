@@ -10,26 +10,26 @@ function snapshotHasItems(s: { items?: unknown[] } | null): s is NonNullable<typ
  * 2) 若无，则上月末及以前最近一条；
  * 3) 若无，则本月内最早一条（便于月中才首次拍瞬间）。
  */
-export async function pickMonthBaselineSnapshot(db: PrismaClient, year: number, month: number) {
+export async function pickMonthBaselineSnapshot(db: PrismaClient, year: number, month: number, userId: string) {
   const firstDay = new Date(year, month, 1);
   const secondDay = new Date(year, month, 2);
 
   let snap = await db.snapshot.findFirst({
-    where: { snapshotDate: { gte: firstDay, lt: secondDay } },
+    where: { userId, snapshotDate: { gte: firstDay, lt: secondDay } },
     include: { items: true },
     orderBy: { snapshotDate: "desc" },
   });
   if (snapshotHasItems(snap)) return snap;
 
   snap = await db.snapshot.findFirst({
-    where: { snapshotDate: { lt: firstDay } },
+    where: { userId, snapshotDate: { lt: firstDay } },
     include: { items: true },
     orderBy: { snapshotDate: "desc" },
   });
   if (snapshotHasItems(snap)) return snap;
 
   snap = await db.snapshot.findFirst({
-    where: { snapshotDate: { gte: firstDay } },
+    where: { userId, snapshotDate: { gte: firstDay } },
     include: { items: true },
     orderBy: { snapshotDate: "asc" },
   });

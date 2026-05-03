@@ -8,7 +8,7 @@ function pad2(n: number) {
 }
 
 /**
- * GET：若「今天」为中国时区下当月的最后一个 A 股交易日，则自动拍一条瞬间；同月幂等。
+ * GET：若「今天」为中国时区下当月的最后一个 A 股交易日，则为每位用户自动拍一条瞬间；同用户同月幂等。
  */
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET?.trim();
@@ -36,20 +36,22 @@ export async function GET(request: Request) {
   }
 
   const noteTag = `月末自动·${y}-${pad2(m)}`;
-  const existing = await prisma.snapshot.findFirst({
-    where: { note: { startsWith: noteTag } },
-  });
-  if (existing) {
-    return NextResponse.json({
-      ok: true,
-      skipped: true,
-      reason: "already_recorded",
-      snapshotId: existing.id,
+  const snapshotDate = new Date(`${lastTd}T15:30:00+08:00`);
+
+  const users = await prisma.user.findMany({ select: { id: true } });
+  const out: Array<{ userId: string; snapshotId?: string; skipped?: boolean; reason?: string }> = [];
+
+  for (const u of users) {
+    const existing = await prisma.snapshot.findFirst({
+      where: { userId: u.id, note: { startsWith: noteTag } },
     });
+    if (existing) {
+      out.push({ userId: u.id, skipped: true, reason: "already_recorded", snapshotId: existing.id });
+      continue;
+    }
+    const snap = await persistSnapshot(prisma, snapshotDate, `${noteTag}（${lastTd}）`, u.id);
+    out.push({ userId: u.id, snapshotId: snap.id });
   }
 
-  const snapshotDate = new Date(`${lastTd}T15:30:00+08:00`);
-  const snap = await persistSnapshot(prisma, snapshotDate, `${noteTag}（${lastTd}）`);
-
-  return NextResponse.json({ ok: true, snapshotId: snap.id, snapshotDate: lastTd });
+  return NextResponse.json({ ok: true, snapshotDate: lastTd, usersProcessed: users.length, results: out });
 }

@@ -1,14 +1,25 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hasBuyOrSellTransactions } from "@/lib/ledger";
+import { requireUser } from "@/lib/auth/require-user";
 
 export async function GET(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const { searchParams } = new URL(request.url);
   const productId = searchParams.get("productId");
   const dateFrom = searchParams.get("dateFrom");
   const dateTo = searchParams.get("dateTo");
 
-  const where: { productId?: string; date?: { gte?: Date; lte?: Date } } = {};
+  const where: {
+    productId?: string;
+    date?: { gte?: Date; lte?: Date };
+    product: { userId: string };
+  } = {
+    product: { userId },
+  };
   if (productId) where.productId = productId;
   if (dateFrom || dateTo) {
     where.date = {};
@@ -17,7 +28,7 @@ export async function GET(request: Request) {
   }
 
   const list = await prisma.transaction.findMany({
-    where: Object.keys(where).length ? where : undefined,
+    where,
     include: { product: { select: { name: true, code: true, account: true } } },
     orderBy: { date: "desc" },
     take: 500,
@@ -26,13 +37,17 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const body = await request.json();
   const { productId, type, date, quantity, price, amount, note } = body;
   if (!productId || typeof productId !== "string") {
     return NextResponse.json({ message: "缺少 productId" }, { status: 400 });
   }
 
-  const product = await prisma.product.findUnique({ where: { id: productId } });
+  const product = await prisma.product.findFirst({ where: { id: productId, userId } });
   if (!product) {
     return NextResponse.json({ message: "产品不存在" }, { status: 404 });
   }

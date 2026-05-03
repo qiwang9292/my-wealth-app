@@ -1,13 +1,18 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { hasBuyOrSellTransactions, ledgerMigrationOpening, sumLifetimeRealizedPnl } from "@/lib/ledger";
+import { requireUser } from "@/lib/auth/require-user";
 
 export const dynamic = "force-dynamic";
 
 /** GET：已清仓产品列表（不含误删软删） */
 export async function GET() {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const closed = await prisma.product.findMany({
-    where: { deletedAt: null, closedAt: { not: null } },
+    where: { userId, deletedAt: null, closedAt: { not: null } },
     orderBy: { closedAt: "desc" },
     include: { transactions: { orderBy: { date: "asc" } } },
   });

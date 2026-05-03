@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { requireUser } from "@/lib/auth/require-user";
 import { usesShareTimesNavForCategory } from "@/lib/categories";
 import { lookupCodeByName } from "@/lib/finance-api";
 import { isOrderDateYmd, resolveBuySingleSide } from "@/lib/resolve-buy-single-side";
@@ -20,6 +21,10 @@ type Body = {
  * - 股票/场内：以订单日为起点取首个交易日收盘价。
  */
 export async function POST(request: Request) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const body = (await request.json().catch(() => ({}))) as Body;
   const productId = typeof body.productId === "string" ? body.productId.trim() : "";
   const orderDate = typeof body.orderDate === "string" ? body.orderDate.trim() : "";
@@ -40,7 +45,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ message: "type 仅支持 BUY / SELL（分红请直接填金额记流水）" }, { status: 400 });
   }
 
-  const product = await prisma.product.findUnique({ where: { id: productId } });
+  const product = await prisma.product.findFirst({ where: { id: productId, userId } });
   if (!product) {
     return NextResponse.json({ message: "产品不存在" }, { status: 404 });
   }

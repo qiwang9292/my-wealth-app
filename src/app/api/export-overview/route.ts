@@ -54,9 +54,15 @@ export async function GET(request: Request) {
   const overviewUrl = new URL("/api/overview", origin);
   const periodUrl = new URL("/api/period-pnl", origin);
 
+  const cookie = request.headers.get("cookie");
+  const fetchInit: RequestInit = {
+    cache: "no-store",
+    ...(cookie ? { headers: { cookie } } : {}),
+  };
+
   const [ovRes, ppRes] = await Promise.all([
-    fetch(overviewUrl, { cache: "no-store" }),
-    fetch(periodUrl, { cache: "no-store" }),
+    fetch(overviewUrl, fetchInit),
+    fetch(periodUrl, fetchInit),
   ]);
 
   if (!ovRes.ok) {

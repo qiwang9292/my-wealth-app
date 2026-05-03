@@ -1,36 +1,37 @@
 # Wealth Tracker · 资产总览
 
-流水驱动的本地资产追踪 Web App（Phase 1：表格 + 流水 + 快照）。
+流水驱动的资产追踪 Web App（表格 + 流水 + 快照），支持**多用户**注册登录，便于部署到 **Vercel** 等线上环境。
 
 ## 技术栈
 
-- **Next.js 14** (App Router) + TypeScript + Tailwind CSS
-- **SQLite** + Prisma
+- **Next.js** (App Router) + TypeScript + Tailwind CSS
+- **PostgreSQL** + Prisma（本地可用 Docker / Neon 免费库等）
 
 ## 本地运行
 
-### 日常打开（推荐）
+### 环境变量
 
-**双击项目根目录下的 `start.bat`** 即可启动开发服务器，约 6 秒后会自动打开浏览器到 [http://localhost:3000](http://localhost:3000)。关闭弹出的「Wealth Tracker」命令行窗口即可停止服务。
+复制 `.env.example` 为 `.env`，至少配置：
 
-（首次使用或修改过数据库结构时，需要先执行下面的「首次 / 更新后」步骤。）
+- `DATABASE_URL`：PostgreSQL 连接串  
+- `AUTH_SECRET`：随机长字符串（用于 JWT 会话签名）
 
-### 首次使用或更新数据库后
+找回密码邮件可选配置 `SMTP_*`；不配时开发环境下验证码会打印在运行 `npm run dev` 的终端里。
 
-1. 安装依赖（需已安装 Node.js）：
+### 日常开发
 
-   ```bash
-   npm install
-   ```
+```bash
+npm install
+npx prisma generate
+npx prisma db push
+npm run dev
+```
 
-2. 生成 Prisma 客户端并创建数据库：
+浏览器打开 [http://localhost:3000](http://localhost:3000)，首次使用请先**注册**账号再录入资产。
 
-   ```bash
-   npx prisma generate
-   npx prisma db push
-   ```
+### 从旧版 SQLite 迁移
 
-之后日常只需**双击 `start.bat`** 打开应用。
+旧版 `file:./dev.db` 数据不会自动迁移；请导出必要数据后在新库中重新导入或手工录入。
 
 ## 功能说明（Phase 1）
 
@@ -52,8 +53,6 @@
 npx prisma generate
 npx prisma db push
 ```
-
-若之前已有旧版数据库，可能需删除 `prisma/dev.db` 后重新 `db push`。
 
 ## 后续阶段
 

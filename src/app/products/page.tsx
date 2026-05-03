@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
@@ -70,6 +70,14 @@ function groupProductsByAccountForSelect(
 }
 
 export default function ProductsIndexPage() {
+  return (
+    <Suspense fallback={<p className="p-4 text-sm text-slate-500">加载中…</p>}>
+      <ProductsIndexPageInner />
+    </Suspense>
+  );
+}
+
+function ProductsIndexPageInner() {
   const searchParams = useSearchParams();
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [loading, setLoading] = useState(true);

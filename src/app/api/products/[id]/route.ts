@@ -7,21 +7,26 @@ import { normalizeProductMeta } from "@/lib/product-meta";
 import { ensureProductDividendMethodColumn } from "@/lib/ensure-product-dividend-method-column";
 import { syncProductDividendMethod } from "@/lib/sync-product-dividend-method";
 import { syncProductMaturityDate } from "@/lib/sync-product-maturity";
+import { requireUser } from "@/lib/auth/require-user";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const id = (await params).id;
   const alive = await prisma.product.findFirst({
-    where: { id, deletedAt: null, closedAt: null },
+    where: { id, userId, deletedAt: null, closedAt: null },
     select: { id: true },
   });
   if (!alive) {
     return NextResponse.json({ message: "产品不存在、已清仓或已删减，无法修改" }, { status: 404 });
   }
 
-  const current = await prisma.product.findUnique({ where: { id } });
+  const current = await prisma.product.findFirst({ where: { id, userId } });
   if (!current) {
     return NextResponse.json({ message: "产品不存在" }, { status: 404 });
   }
@@ -311,9 +316,13 @@ export async function PATCH(
 
 /** DELETE：删减误建产品（仅允许无流水）；软删除并释放 code */
 export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const id = (await params).id;
   const p = await prisma.product.findFirst({
-    where: { id, deletedAt: null },
+    where: { id, userId, deletedAt: null },
     select: { id: true },
   });
   if (!p) {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { requireUser } from "@/lib/auth/require-user";
 import {
   fetchFundNavFirstOnOrAfter,
   fetchStockCloseFirstOnOrAfter,
@@ -17,12 +18,17 @@ export const dynamic = "force-dynamic";
 
 /** GET：按产品返回本周、年度盈亏金额与百分比（保留字段名 pnl3m/pnl6m 以兼容前端） */
 export async function GET() {
+  const auth = await requireUser();
+  if (auth instanceof Response) return auth;
+  const { userId } = auth;
+
   const now = new Date();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
   const ytdStart = new Date(now.getFullYear(), 0, 1);
 
   const products = await prisma.product.findMany({
     where: {
+      userId,
       deletedAt: null,
       closedAt: null,
       category: { in: ["权益", "债权", "商品"] },
