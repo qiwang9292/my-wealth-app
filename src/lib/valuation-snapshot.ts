@@ -134,12 +134,18 @@ export async function buildSnapshotLineItems(
     const { units, costBasis } = computeLedgerFromTransactions(txs, navImpute, migrationOpen);
     const cashFx = isCashCategory(p.category);
     const shareNav = usesShareTimesNavForCategory(p.category);
-    const displayUnits = cashFx ? 0 : ledgerLocked ? units : unitsOverrideRaw ?? units;
+    const displayUnitsRaw = cashFx ? 0 : ledgerLocked ? units : unitsOverrideRaw ?? units;
+    /** 现金/理财：总览口径下不展示份额列，避免被误用于「份额×净值」 */
+    const displayUnits = shareNav ? displayUnitsRaw : 0;
     const displayCost = ledgerLocked ? costBasis : costOverrideRaw ?? costBasis;
 
     const rawLatestPrice = latestPriceByProduct.has(p.id) ? latestPriceByProduct.get(p.id)! : null;
-    const latestPrice =
+    const latestPriceForShareNav =
       rawLatestPrice != null && Number.isFinite(rawLatestPrice) && rawLatestPrice > 0
+        ? rawLatestPrice
+        : null;
+    const latestPriceForBalance =
+      rawLatestPrice != null && Number.isFinite(rawLatestPrice) && rawLatestPrice >= 0
         ? rawLatestPrice
         : null;
     const monthStartSnap = monthStartByProduct[p.id];
@@ -149,24 +155,57 @@ export async function buildSnapshotLineItems(
     if (cashFx && subNorm === "美元") fxSpotCny = fxRates.usdCny;
     else if (cashFx && subNorm === "日元") fxSpotCny = fxRates.jpyCny;
 
+    /** 现金·人民币/理财：若存在手填覆盖（含 0），优先视为当前金额。 */
+    const nonShareManualBalance =
+      !shareNav &&
+      !isCashFxSub(subNorm) &&
+      unitsOverrideRaw != null &&
+      Number.isFinite(unitsOverrideRaw) &&
+      unitsOverrideRaw >= 0
+        ? unitsOverrideRaw
+        : null;
+    /** 理财：优先使用手填覆盖，其次使用手填/更新净值写入的当前金额（DailyPrice） */
+    const wealthManualBalance = isWealthCategory(p.category)
+      ? nonShareManualBalance ?? latestPriceForBalance
+      : null;
+    /** 现金·人民币：同理，优先使用手填覆盖；否则使用 DailyPrice。 */
+    const cashCnyManualBalance =
+      cashFx && !isCashFxSub(subNorm) ? nonShareManualBalance ?? latestPriceForBalance : null;
+    /** 理财且有买卖流水：仅在未手填当前金额时，回退到账本持仓 */
+    const wealthLedgerUnits =
+      ledgerLocked && isWealthCategory(p.category) && wealthManualBalance == null
+        ? Math.max(0, Number.isFinite(units) ? units : 0)
+        : null;
+    const priceForMv =
+      (cashCnyManualBalance ?? wealthManualBalance) ??
+      (wealthLedgerUnits != null
+        ? wealthLedgerUnits > 0
+          ? wealthLedgerUnits
+          : null
+        : latestPriceForShareNav);
+
     let marketValue = 0;
-    if (latestPrice != null) {
+    if (wealthLedgerUnits != null && wealthLedgerUnits === 0) {
+      marketValue = 0;
+    } else if (priceForMv != null) {
       if (cashFx) {
         if (isCashFxSub(subNorm)) {
           marketValue = marketValueCashForeignBalance({
-            foreignBalance: latestPrice,
+            foreignBalance: priceForMv,
             fxSpotCnyPerUnit: fxSpotCny,
             fallbackCostCny: displayCost,
           });
         } else {
-          marketValue = latestPrice;
+          marketValue = priceForMv;
         }
-      } else if (displayUnits > 0) {
-        marketValue = marketValueFromUnitsAndNav(displayUnits, latestPrice);
+      } else if (!shareNav) {
+        marketValue = priceForMv;
+      } else if (displayUnits !== 0) {
+        marketValue = marketValueFromUnitsAndNav(displayUnits, priceForMv);
       } else if (p.type !== "FUND" && p.type !== "STOCK") {
-        marketValue = latestPrice;
+        marketValue = priceForMv;
       } else if (p.type === "FUND") {
-        marketValue = latestPrice >= 100 ? latestPrice : monthStartSnap ?? 0;
+        marketValue = priceForMv >= 100 ? priceForMv : monthStartSnap ?? 0;
       } else {
         marketValue = monthStartSnap ?? 0;
       }
@@ -186,7 +225,7 @@ export async function buildSnapshotLineItems(
     let snapUnitPrice: number;
     const snapTotal = marketValue;
     if (snapUnits > 0) {
-      snapUnitPrice = latestPrice ?? 0;
+      snapUnitPrice = latestPriceForShareNav ?? 0;
     } else {
       snapUnitPrice = marketValue;
     }

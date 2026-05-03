@@ -247,40 +247,73 @@ export async function GET() {
     const displayCost = ledgerLocked ? costBasis : costOverrideRaw ?? costBasis;
 
     const rawLatestPrice = latestPriceByProduct.has(p.id) ? latestPriceByProduct.get(p.id)! : null;
-    /** 净值为 0/NaN 视为无有效单价，走与「无 DailyPrice」相同的占位逻辑 */
-    const latestPrice =
+    /** 净值类（债/商/权）仍要求 >0；现金/理财余额类允许 0（表示当前为 0）。 */
+    const latestPriceForShareNav =
       rawLatestPrice != null && Number.isFinite(rawLatestPrice) && rawLatestPrice > 0
         ? rawLatestPrice
         : null;
-    const monthStartSnap = monthStartByProduct[p.id];
-
+    const latestPriceForBalance =
+      rawLatestPrice != null && Number.isFinite(rawLatestPrice) && rawLatestPrice >= 0
+        ? rawLatestPrice
+        : null;
     const subNorm = (p.subCategory ?? "").trim();
     let fxSpotCny: number | null = null;
     if (cashFx && subNorm === "美元") fxSpotCny = fxRates.usdCny;
     else if (cashFx && subNorm === "日元") fxSpotCny = fxRates.jpyCny;
+    /** 现金·人民币/理财：若存在手填覆盖（含 0），优先视为当前金额。 */
+    const nonShareManualBalance =
+      !shareNav &&
+      !isCashFxSub(subNorm) &&
+      unitsOverrideRaw != null &&
+      Number.isFinite(unitsOverrideRaw) &&
+      unitsOverrideRaw >= 0
+        ? unitsOverrideRaw
+        : null;
+    /** 理财：优先使用手填覆盖，其次使用手填/更新净值写入的当前金额（DailyPrice）。 */
+    const wealthManualBalance = isWealthCategory(p.category)
+      ? nonShareManualBalance ?? latestPriceForBalance
+      : null;
+    /** 现金·人民币：同理，优先使用手填覆盖；否则使用 DailyPrice。 */
+    const cashCnyManualBalance =
+      cashFx && !isCashFxSub(subNorm) ? nonShareManualBalance ?? latestPriceForBalance : null;
+    /** 理财且有买卖流水：当未手填当前金额时，回退到账本剩余持仓（元/份口径）避免总额失真 */
+    const wealthLedgerUnits =
+      ledgerLocked && isWealthCategory(p.category) && wealthManualBalance == null
+        ? Math.max(0, Number.isFinite(units) ? units : 0)
+        : null;
+    const priceForMv =
+      (cashCnyManualBalance ?? wealthManualBalance) ??
+      (wealthLedgerUnits != null
+        ? wealthLedgerUnits > 0
+          ? wealthLedgerUnits
+          : null
+        : latestPriceForShareNav);
+    const monthStartSnap = monthStartByProduct[p.id];
 
     let marketValue = 0;
-    if (latestPrice != null) {
+    if (wealthLedgerUnits != null && wealthLedgerUnits === 0) {
+      marketValue = 0;
+    } else if (priceForMv != null) {
       if (cashFx) {
         if (isCashFxSub(subNorm)) {
           marketValue = marketValueCashForeignBalance({
-            foreignBalance: latestPrice,
+            foreignBalance: priceForMv,
             fxSpotCnyPerUnit: fxSpotCny,
             fallbackCostCny: displayCost,
           });
         } else {
-          marketValue = latestPrice;
+          marketValue = priceForMv;
         }
       } else if (!shareNav) {
-        /** 理财等：DailyPrice 存的是当日余额/总市值（与「更新净值」一致），非每股单价 */
-        marketValue = latestPrice;
+        /** 理财等：无流水时 DailyPrice 为余额/总市值；有流水时见 priceForMv 与 wealthLedgerUnits */
+        marketValue = priceForMv;
       } else if (displayUnits !== 0) {
         /** 含负份额：一律 份额×净值，避免再走基金占位市值导致与份额列矛盾 */
-        marketValue = marketValueFromUnitsAndNav(displayUnits, latestPrice);
+        marketValue = marketValueFromUnitsAndNav(displayUnits, priceForMv);
       } else if (p.type !== "FUND" && p.type !== "STOCK") {
-        marketValue = latestPrice;
+        marketValue = priceForMv;
       } else if (p.type === "FUND") {
-        marketValue = latestPrice >= 100 ? latestPrice : monthStartSnap ?? 0;
+        marketValue = priceForMv >= 100 ? priceForMv : monthStartSnap ?? 0;
       } else {
         marketValue = monthStartSnap ?? 0;
       }
@@ -344,7 +377,7 @@ export async function GET() {
         dcaWeekday: p.dcaWeekday,
         dcaAnchorDate: p.dcaAnchorDate,
       },
-      shareNav ? latestPrice : null,
+      shareNav ? priceForMv : null,
       now
     );
 
@@ -364,7 +397,7 @@ export async function GET() {
       unitsOverride: cashFx || !shareNav ? null : unitsOverrideRaw,
       hasTransactions: ledgerLocked,
       ledgerLocked,
-      latestPrice,
+      latestPrice: priceForMv,
       fxSpotCny,
       latestPriceDate: latestPriceDateByProduct.get(p.id) ?? null,
       marketValue,

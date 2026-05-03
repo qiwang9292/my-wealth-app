@@ -186,8 +186,7 @@ function buildNavRateTitle(
     return `汇率接口不可用：本列显示最近录入的外币余额（非汇率）。市值暂按人民币总成本或该余额退化展示。记录日期：${d}`;
   }
   if (isWealthCategory(r.category)) {
-    const d = r.latestPriceDate?.trim() || "未知";
-    return `理财：本列为当前总金额/估值（由「更新净值」或导入写入，不是每股单价）。记录日期：${d}`;
+    return "理财：本列不展示净值/汇率；当前总金额/估值请在「份额」列维护，或通过「更新净值」写入。";
   }
   if (r.latestPrice != null) {
     const d = r.latestPriceDate?.trim() || "未知";
@@ -310,7 +309,8 @@ function displayCostWithDraft(costBasis: number, draftStr: string | undefined): 
 
 /** 盈亏微型色块：盈利=红底，亏损=绿底 */
 function PnLTag({ value, prefix = "", suffix = "" }: { value: number | null; prefix?: string; suffix?: string }) {
-  if (value == null || (typeof value === "number" && Number.isNaN(value))) return <span className="text-slate-400">—</span>;
+  if (value == null || (typeof value === "number" && Number.isNaN(value)))
+    return <span className="text-slate-400">—</span>;
   const isProfit = value >= 0;
   const text = (value >= 0 ? "+" : "") + (suffix === "%" ? value.toFixed(2) : fmtNum(value)) + suffix;
   return (
@@ -321,7 +321,8 @@ function PnLTag({ value, prefix = "", suffix = "" }: { value: number | null; pre
           : "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300"
       }`}
     >
-      {prefix}{text}
+      {prefix}
+      {text}
     </span>
   );
 }
@@ -962,6 +963,23 @@ function HomeInner() {
     overallRisk,
   ]);
 
+  /** 与「本月盈亏（持仓）%」同一范围：债/商/权、本月盈亏（元）> 0 的前五名 */
+  const monthHoldingsTopWinners = useMemo(() => {
+    const allSet = new Set(displayCategoryList.map((c) => c.name));
+    const selSet = new Set(selectedCategoryNames);
+    const categorySubsetActive =
+      allSet.size > 0 &&
+      (selSet.size !== allSet.size || ![...allSet].every((n) => selSet.has(n)));
+    const scopedRows = categorySubsetActive ? rows.filter((r) => selSet.has(r.category)) : rows;
+    const list = scopedRows.filter(
+      (r) => usesShareTimesNavForCategory(r.category) && r.pnl1m != null && r.pnl1m > 0
+    );
+    return [...list]
+      .sort((a, b) => Number(b.pnl1m) - Number(a.pnl1m))
+      .slice(0, 5)
+      .map((r) => ({ name: r.name, pnl1m: r.pnl1m as number }));
+  }, [displayCategoryList, selectedCategoryNames, rows]);
+
   const toggleCategorySelection = (name: string) => {
     setSelectedCategoryNames((prev) => {
       if (prev.includes(name)) return prev.filter((x) => x !== name);
@@ -1197,13 +1215,13 @@ function HomeInner() {
             <col style={{ width: "6%" }} />
             <col style={{ width: "5%" }} />
             <col style={{ width: "7%" }} />
-            <col style={{ width: "9%" }} />
+            <col style={{ width: "7%" }} />
             <col style={{ width: "11%" }} />
             <col style={{ width: "11%" }} />
             <col style={{ width: "8%" }} />
             <col style={{ width: "6%" }} />
             <col style={{ width: "6%" }} />
-            <col style={{ width: "6%" }} />
+            <col style={{ width: "8%" }} />
           </colgroup>
           <thead className="sticky top-0 z-20 bg-slate-100 dark:bg-slate-800 shadow-sm">
             <tr>
@@ -1221,7 +1239,7 @@ function HomeInner() {
               </th>
               <th
                 className="text-right py-1.5 px-1 text-xs font-medium border-b border-slate-200 dark:border-slate-600 whitespace-nowrap text-slate-600 dark:text-slate-300"
-                title="权益/债权/商品：最新净值或单价（市值=份额×本列）。现金·美元/日元：参考汇率（市值=外币余额×汇率，余额在「更新净值」）。理财：当前总金额/估值。悬停单元格可看记录日期"
+                title="权益/债权/商品：最新净值或单价（市值=份额×本列）。现金·美元/日元：参考汇率（市值=外币余额×汇率，余额在「更新净值」）。现金·人民币与理财：本列不展示；理财请在「份额」列填当前总金额/估值。悬停单元格可看说明"
               >
                 净值<span className="text-slate-400 font-normal mx-0.5">/</span>汇率
                 {navRateStamp && <span className="ml-1 text-[10px] font-normal text-slate-400">({navRateStamp})</span>}
@@ -1252,7 +1270,7 @@ function HomeInner() {
                 年度盈亏%
               </th>
               <th
-                className="text-right py-1.5 px-1 text-xs font-semibold border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
+                className="text-center py-1.5 px-1 text-xs font-semibold border-b border-slate-200 dark:border-slate-600 whitespace-nowrap"
                 title="收益率 = (市值 + 累计现金分红 − 总成本) / 总成本。现金·人民币、理财不展示（同上）。"
               >
                 持仓盈亏
@@ -1317,15 +1335,17 @@ function HomeInner() {
                   const priceOrRateCell =
                     isCashCategory(r.category) && isCashCnySub(r.subCategory)
                       ? "—"
-                      : isCashCategory(r.category) && isCashFxSub(r.subCategory)
-                        ? r.fxSpotCny != null && Number.isFinite(r.fxSpotCny)
-                          ? fmtFxSpotCny(r.fxSpotCny, r.subCategory)
-                        : r.latestPrice != null
-                          ? `${fmtUnitNav(r.latestPrice)}\u00A0${(r.subCategory ?? "").trim() === "日元" ? "JPY" : "USD"}`
-                          : "—"
-                        : r.latestPrice != null
-                          ? fmtUnitNav(r.latestPrice)
-                          : "—";
+                      : isWealthCategory(r.category)
+                        ? "—"
+                        : isCashCategory(r.category) && isCashFxSub(r.subCategory)
+                          ? r.fxSpotCny != null && Number.isFinite(r.fxSpotCny)
+                            ? fmtFxSpotCny(r.fxSpotCny, r.subCategory)
+                          : r.latestPrice != null
+                            ? `${fmtUnitNav(r.latestPrice)}\u00A0${(r.subCategory ?? "").trim() === "日元" ? "JPY" : "USD"}`
+                            : "—"
+                          : r.latestPrice != null
+                            ? fmtUnitNav(r.latestPrice)
+                            : "—";
                   return (
                     <tr key={r.productId} className="border-b border-slate-100 dark:border-slate-700/50 hover:bg-slate-50/50 dark:hover:bg-slate-700/30">
                       <td className="py-0.5 px-1.5 text-slate-600 dark:text-slate-400 truncate" title={r.account ?? ""}>
@@ -1442,7 +1462,7 @@ function HomeInner() {
                         <PnLTag value={r.pnl6mPct ?? null} suffix="%" />
                       </td>
                       <td
-                        className="text-right py-0.5 px-1 tabular-nums whitespace-nowrap"
+                        className="text-center py-0.5 px-1 tabular-nums whitespace-nowrap"
                         title={
                           skipCostMetrics
                             ? "本类不计算持仓盈亏%"
@@ -1741,9 +1761,9 @@ function HomeInner() {
                 ¥ {fmtNum(assetSummaryScope.displayTotal)}
               </div>
             </div>
-            <div>
+            <div className="relative group/monthPctTip">
               <div
-                className="text-xs text-slate-500 dark:text-slate-400 mb-0.5"
+                className="text-xs text-slate-500 dark:text-slate-400 mb-0.5 cursor-help"
                 title={
                   assetSummaryScope.categorySubsetActive
                     ? "当前为下方选中大类之和：债/商/权本月持仓盈亏 ÷ 对应月初参考市值（%）；与全库口径一致，仅缩小范围。"
@@ -1764,6 +1784,30 @@ function HomeInner() {
                 {assetSummaryScope.monthPct != null
                   ? (assetSummaryScope.monthPct >= 0 ? "+" : "") + assetSummaryScope.monthPct.toFixed(2) + "%"
                   : "—"}
+              </div>
+              <div
+                className="pointer-events-none invisible absolute left-0 bottom-full z-[120] mb-1.5 w-max max-w-[min(100vw-2rem,20rem)] rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-left text-[11px] leading-snug text-slate-700 shadow-lg opacity-0 transition-opacity duration-150 group-hover/monthPctTip:visible group-hover/monthPctTip:opacity-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200"
+                role="tooltip"
+              >
+                <div className="mb-1 font-medium text-slate-600 dark:text-slate-300">本月盈利前五（元）</div>
+                {monthHoldingsTopWinners.length === 0 ? (
+                  <div className="text-slate-500 dark:text-slate-400">
+                    当前范围内暂无正向本月盈亏（需债/商/权持仓、月初快照等）。
+                  </div>
+                ) : (
+                  <ul className="space-y-0.5">
+                    {monthHoldingsTopWinners.map((w, i) => (
+                      <li key={`${w.name}-${i}`} className="flex justify-between gap-3 tabular-nums">
+                        <span className="min-w-0 shrink truncate" title={w.name}>
+                          {i + 1}. {w.name}
+                        </span>
+                        <span className="shrink-0 whitespace-nowrap text-green-600 dark:text-green-400">
+                          +¥{fmtNum(w.pnl1m)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
             </div>
             <div>
