@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { CATEGORY_ORDER, getSubCategories, usesShareTimesNavForCategory } from "@/lib/categories";
 import { normalizeProductMeta } from "@/lib/product-meta";
 import { syncProductMaturityDate } from "@/lib/sync-product-maturity";
+import { replaceDailyPriceForShanghaiDay, shanghaiMidnightToday } from "@/lib/daily-price-day";
 import { persistSnapshot } from "@/lib/valuation-snapshot";
 import { requireUser } from "@/lib/auth/require-user";
 
@@ -369,8 +370,7 @@ async function handleImportExcelPost(request: Request): Promise<Response> {
   const supplements = parseSupplementsForm(form);
   applyAmountSupplements(out, supplements);
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = shanghaiMidnightToday();
 
   const seenKeys = new Set<string>();
   const plans: Array<{
@@ -639,11 +639,7 @@ async function handleImportExcelPost(request: Request): Promise<Response> {
 
     if (row.amount != null) {
       const price = row.amount;
-      await prisma.dailyPrice.upsert({
-        where: { productId_date: { productId: product.id, date: today } },
-        create: { productId: product.id, date: today, price },
-        update: { price },
-      });
+      await replaceDailyPriceForShanghaiDay(prisma, product.id, today, price);
       priced++;
     }
   }

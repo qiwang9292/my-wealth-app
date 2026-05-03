@@ -1,6 +1,17 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireUser } from "@/lib/auth/require-user";
+import { replaceDailyPriceForShanghaiDay, shanghaiMidnightOnYmd, shanghaiMidnightToday } from "@/lib/daily-price-day";
+
+function parseDayRef(raw: unknown): Date {
+  if (raw == null || raw === "") return shanghaiMidnightToday();
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return shanghaiMidnightOnYmd(t);
+  }
+  const d = new Date(raw as string | number | Date);
+  return Number.isNaN(d.getTime()) ? shanghaiMidnightToday() : d;
+}
 
 export async function GET(request: Request) {
   const auth = await requireUser();
@@ -49,19 +60,11 @@ export async function POST(request: Request) {
   if (!owned) {
     return NextResponse.json({ message: "产品不存在" }, { status: 404 });
   }
-  const row = await prisma.dailyPrice.upsert({
-    where: {
-      productId_date: {
-        productId,
-        date: date ? new Date(date) : new Date(),
-      },
-    },
-    create: {
-      productId,
-      date: date ? new Date(date) : new Date(),
-      price: Number(price),
-    },
-    update: { price: Number(price) },
-  });
+  const n = Number(price);
+  if (!Number.isFinite(n)) {
+    return NextResponse.json({ message: "价格无效" }, { status: 400 });
+  }
+  const dayRef = parseDayRef(date);
+  const row = await replaceDailyPriceForShanghaiDay(prisma, productId, dayRef, n);
   return NextResponse.json(row);
 }

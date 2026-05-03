@@ -2,10 +2,11 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 
 export default function ForgotPasswordPage() {
+  const router = useRouter();
   const [email, setEmail] = useState("");
-  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -13,7 +14,6 @@ export default function ForgotPasswordPage() {
     e.preventDefault();
     setLoading(true);
     setError("");
-    setMessage("");
     const res = await fetch("/api/auth/forgot-password", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -25,7 +25,11 @@ export default function ForgotPasswordPage() {
       setError(typeof data.message === "string" ? data.message : "提交失败");
       return;
     }
-    setMessage(typeof data.message === "string" ? data.message : "已处理");
+    const q = new URLSearchParams({
+      email: email.trim(),
+      sent: "1",
+    });
+    router.replace(`/reset-password?${q.toString()}`);
   }
 
   return (
@@ -45,7 +49,6 @@ export default function ForgotPasswordPage() {
             />
           </div>
           {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
-          {message && <p className="text-sm text-emerald-700 dark:text-emerald-400">{message}</p>}
           <button
             type="submit"
             disabled={loading}

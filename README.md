@@ -5,7 +5,7 @@
 ## 技术栈
 
 - **Next.js** (App Router) + TypeScript + Tailwind CSS
-- **PostgreSQL** + Prisma（本地可用 Docker / Neon 免费库等）
+- **Prisma** + 数据库：默认 **本地 SQLite**（`file:./dev.db`）；上线 Vercel 等请改用 **PostgreSQL**（见 `prisma/schema.prisma` 顶部注释与 `.env.example`）
 
 ## 本地运行
 
@@ -13,7 +13,7 @@
 
 复制 `.env.example` 为 `.env`，至少配置：
 
-- `DATABASE_URL`：PostgreSQL 连接串  
+- `DATABASE_URL`：本地填 `file:./dev.db`；云端填 PostgreSQL 连接串（并同步修改 `schema.prisma` 里 `provider`）  
 - `AUTH_SECRET`：随机长字符串（用于 JWT 会话签名）
 
 找回密码邮件可选配置 `SMTP_*`；不配时开发环境下验证码会打印在运行 `npm run dev` 的终端里。
@@ -29,9 +29,9 @@ npm run dev
 
 浏览器打开 [http://localhost:3000](http://localhost:3000)，首次使用请先**注册**账号再录入资产。
 
-### 从旧版 SQLite 迁移
+### 从「无登录」旧库升级到有用户字段的库
 
-旧版 `file:./dev.db` 数据不会自动迁移；请导出必要数据后在新库中重新导入或手工录入。
+若 `prisma db push` 提示无法给已有产品/快照加上必填的 `userId`，需要先**备份** `prisma/dev.db`，再执行 `npx prisma db push --force-reset`（会清空当前库），然后注册账号并重新导入或录入数据。
 
 ## 功能说明（Phase 1）
 

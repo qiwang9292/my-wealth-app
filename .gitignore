@@ -37,6 +37,7 @@ next-env.d.ts
 # prisma / sqlite（本地库勿提交）
 prisma/dev.db
 prisma/dev.db-journal
+prisma/*.backup*
 /dev.db
 /dev.db-journal
 *.db

@@ -54,6 +54,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "该邮箱已被注册。" }, { status: 409 });
     }
     console.error("[auth/register]", e);
-    return NextResponse.json({ message: "注册失败，请稍后重试。" }, { status: 500 });
+    const hint =
+      process.env.NODE_ENV === "development"
+        ? (e instanceof Error ? e.message : String(e))
+        : null;
+    return NextResponse.json(
+      {
+        message: hint ? `注册失败：${hint}` : "注册失败，请稍后重试。",
+      },
+      { status: 500 }
+    );
   }
 }

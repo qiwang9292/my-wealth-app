@@ -18,7 +18,9 @@ import {
 import { DatePickerField } from "@/components/DatePickerField";
 import { AddTransactionModal } from "@/components/AddTransactionModal";
 import { isJicunGoldProductName } from "@/lib/jicun-gold";
+import { shanghaiTodayYmd } from "@/lib/daily-price-day";
 import { inferProductType } from "@/lib/infer-product-type";
+import { filterProductsWithNonEmptyCode, groupProductsByAccount } from "@/lib/product-select-groups";
 
 type CategoryType = (typeof CATEGORY_ORDER)[number];
 
@@ -1201,6 +1203,9 @@ function HomeInner() {
               {sessionEmail}
             </span>
           )}
+          <Link href="/account/password" className="text-sky-600 dark:text-sky-400 hover:underline">
+            修改密码
+          </Link>
           <button
             type="button"
             className="text-sky-600 dark:text-sky-400 hover:underline"
@@ -3359,19 +3364,7 @@ function RemoveProductModal({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const accountGroups = useMemo(() => {
-    const byAcc = new Map<string, typeof products>();
-    for (const p of products) {
-      const label = (p.account ?? "").trim() || "未填账户";
-      if (!byAcc.has(label)) byAcc.set(label, []);
-      byAcc.get(label)!.push(p);
-    }
-    const keys = Array.from(byAcc.keys()).sort((a, b) => a.localeCompare(b, "zh-CN"));
-    for (const k of keys) {
-      byAcc.get(k)!.sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
-    }
-    return keys.map((accountLabel) => ({ accountLabel, items: byAcc.get(accountLabel)! }));
-  }, [products]);
+  const accountGroups = useMemo(() => groupProductsByAccount(products), [products]);
 
   const submit = async () => {
     if (!productId) {
@@ -3412,7 +3405,7 @@ function RemoveProductModal({
           className="w-full text-sm border border-slate-300 dark:border-slate-600 rounded px-2 py-2 bg-white dark:bg-slate-800 mb-4"
         >
           <option value="">选择产品…</option>
-          {accountGroups.map(({ accountLabel, items }) => (
+          {accountGroups.map(([accountLabel, items]) => (
             <optgroup key={accountLabel} label={accountLabel}>
               {items.map((p) => (
                 <option key={p.id} value={p.id}>
@@ -3446,7 +3439,7 @@ function CloseProductModal({
   onClose,
   onDone,
 }: {
-  products: { id: string; name: string; code: string | null }[];
+  products: { id: string; name: string; code: string | null; account?: string | null }[];
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -3454,6 +3447,8 @@ function CloseProductModal({
   const [closedAt, setClosedAt] = useState(() => new Date().toISOString().slice(0, 10));
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const accountGroups = useMemo(() => groupProductsByAccount(products), [products]);
 
   const submit = async () => {
     if (!productId) {
@@ -3499,11 +3494,15 @@ function CloseProductModal({
           className="w-full text-sm border border-slate-300 dark:border-slate-600 rounded px-2 py-2 bg-white dark:bg-slate-800 mb-3"
         >
           <option value="">选择产品…</option>
-          {products.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-              {p.code ? ` (${p.code})` : ""}
-            </option>
+          {accountGroups.map(([accountLabel, items]) => (
+            <optgroup key={accountLabel} label={accountLabel}>
+              {items.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {p.code ? ` (${p.code})` : ""}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
         <label className="block text-sm text-slate-500 mb-1">清仓日期</label>
@@ -4025,15 +4024,32 @@ function UpdatePriceModal({
   onClose,
   onSaved,
 }: {
-  products: { id: string; name: string; code: string | null; category?: string; subCategory?: string | null }[];
+  products: {
+    id: string;
+    name: string;
+    code: string | null;
+    account?: string | null;
+    category?: string;
+    subCategory?: string | null;
+  }[];
   onClose: () => void;
   onSaved: () => void;
 }) {
   const [productId, setProductId] = useState("");
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  /** 须与后端 DailyPrice 归并口径一致（Asia/Shanghai 日历日），勿用 UTC 的 toISOString().slice(0,10) */
+  const [date, setDate] = useState(() => shanghaiTodayYmd());
   const [price, setPrice] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const selectedMeta = products.find((p) => p.id === productId);
+
+  const codedProducts = useMemo(() => filterProductsWithNonEmptyCode(products), [products]);
+  const groupedForPrice = useMemo(() => groupProductsByAccount(codedProducts), [codedProducts]);
+  const selectedMeta = codedProducts.find((p) => p.id === productId);
+
+  useEffect(() => {
+    if (productId && !codedProducts.some((p) => p.id === productId)) {
+      setProductId("");
+    }
+  }, [codedProducts, productId]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -4045,7 +4061,7 @@ function UpdatePriceModal({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           productId,
-          date: new Date(date).toISOString(),
+          date,
           price: Number(price),
         }),
       });
@@ -4064,6 +4080,7 @@ function UpdatePriceModal({
         <h2 className="text-lg font-medium mb-3">更新净值</h2>
         <p className="text-sm text-slate-500 mb-2">
           基金/股票可点「刷新净值」自动拉<strong>最新市价</strong>。现金·<strong>美元/日元</strong>请填<strong>外币余额</strong>（系统按即期汇率折算人民币市值）；现金·人民币与理财填<strong>人民币余额或总市值</strong>。<strong>总成本（人民币）</strong>请在总览「总成本」列维护。权益类本处填<strong>每股/每份净值（单价）</strong>。
+          总览按<strong>上海日期</strong>最新一天的净值计价；同一天只会保留一条记录（多次保存会覆盖）。
         </p>
         <form onSubmit={submit} className="space-y-2">
           <div>
@@ -4075,19 +4092,31 @@ function UpdatePriceModal({
               required
             >
               <option value="">请选择</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
+              {groupedForPrice.map(([accountLabel, list]) => (
+                <optgroup key={accountLabel} label={accountLabel}>
+                  {list.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {String(p.code ?? "").trim()} · {p.name}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
+            <p className="text-xs text-slate-500 mt-1">
+              仅列出已填写<strong>代码</strong>的产品；无代码的现金/理财请直接在总览表格「保存」更新余额。
+            </p>
           </div>
           <div>
-            <label className="block text-sm text-slate-500 mb-0.5">日期</label>
+            <label className="block text-sm text-slate-500 mb-0.5">日期（上海时区日历日）</label>
             <input
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
               className="w-full border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-900"
             />
+            <p className="text-xs text-slate-500 mt-1">
+              总览取「日期最新」的一条净值。若改了某天仍不变，多半是存在<strong>更晚一天</strong>的记录（例如自动刷新）；请把日期调到<strong>今天（上海）</strong>再保存覆盖。
+            </p>
           </div>
           <div>
             <label className="block text-sm text-slate-500 mb-0.5">

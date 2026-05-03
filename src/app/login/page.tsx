@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { PasswordInput } from "@/components/PasswordInput";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -54,14 +55,15 @@ export default function LoginPage() {
             />
           </div>
           <div>
-            <label className="block text-sm text-slate-600 dark:text-slate-300 mb-1">密码</label>
-            <input
-              type="password"
+            <label htmlFor="login-password" className="block text-sm text-slate-600 dark:text-slate-300 mb-1">
+              密码
+            </label>
+            <PasswordInput
+              id="login-password"
               autoComplete="current-password"
               required
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full border border-slate-300 dark:border-slate-600 rounded px-3 py-2 bg-white dark:bg-slate-800 text-sm"
+              onChange={setPassword}
             />
           </div>
           {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}

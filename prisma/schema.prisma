@@ -3,8 +3,10 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// 本地常用 SQLite（DATABASE_URL="file:./dev.db"）。
+// 部署 Vercel / Neon 等时请改为 postgresql + postgres:// 连接串。
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 

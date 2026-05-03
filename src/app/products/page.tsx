@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
+import { groupProductsByAccount } from "@/lib/product-select-groups";
 
 type ProductRow = {
   id: string;
@@ -17,8 +18,6 @@ type ProductRow = {
   dcaWeekday?: number | null;
   dcaAnchorDate?: string | null;
 };
-
-const SELECT_UNSET_ACCOUNT = "（未填账户）";
 
 const TYPE_LABEL: Record<string, string> = {
   FUND: "基金",
@@ -44,29 +43,6 @@ function dcaScheduleText(p: ProductRow): string {
   if (f === "WEEKLY") return `${DCA_FREQ_LABEL[f]} · ${WEEKDAY_LABEL[p.dcaWeekday ?? -1] ?? "?"}`;
   if (f === "BIWEEKLY") return `${DCA_FREQ_LABEL[f]} · 锚点 ${p.dcaAnchorDate ?? "?"}`;
   return DCA_FREQ_LABEL[f];
-}
-
-function groupProductsByAccountForSelect(
-  products: Pick<ProductRow, "id" | "name" | "account">[]
-): [string, { id: string; name: string }[]][] {
-  const byAccount = new Map<string, { id: string; name: string }[]>();
-  for (const p of products) {
-    const label = (p.account ?? "").trim() || SELECT_UNSET_ACCOUNT;
-    const list = byAccount.get(label);
-    const row = { id: p.id, name: p.name };
-    if (list) list.push(row);
-    else byAccount.set(label, [row]);
-  }
-  const entries = Array.from(byAccount.entries());
-  entries.sort(([a], [b]) => {
-    if (a === SELECT_UNSET_ACCOUNT) return 1;
-    if (b === SELECT_UNSET_ACCOUNT) return -1;
-    return a.localeCompare(b, "zh-Hans-CN");
-  });
-  for (const [, list] of entries) {
-    list.sort((x, y) => x.name.localeCompare(y.name, "zh-Hans-CN"));
-  }
-  return entries;
 }
 
 export default function ProductsIndexPage() {
@@ -121,7 +97,7 @@ function ProductsIndexPageInner() {
 
   const visibleProducts = onlyDca ? products.filter((p) => Boolean(p.dcaEnabled)) : products;
   const dcaCandidates = products.filter((p) => !p.dcaEnabled);
-  const groupedDcaCandidates = groupProductsByAccountForSelect(dcaCandidates);
+  const groupedDcaCandidates = groupProductsByAccount(dcaCandidates);
 
   const openCreatePlan = () => {
     setPlanError(null);

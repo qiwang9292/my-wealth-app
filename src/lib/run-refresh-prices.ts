@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { fetchLatestPrice, fetchShfeGoldMainContractYuanPerGram, lookupCodeByName } from "@/lib/finance-api";
+import { replaceDailyPriceForShanghaiDay, shanghaiMidnightToday } from "@/lib/daily-price-day";
 import { isJicunGoldProductName } from "@/lib/jicun-gold";
 import { inferProductType } from "@/lib/infer-product-type";
 
@@ -98,8 +99,7 @@ export async function runRefreshPrices(
     select: { id: true, name: true, code: true, type: true, category: true, subCategory: true },
   });
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = shanghaiMidnightToday();
 
   let updated = 0;
   let codeFilled = 0;
@@ -133,20 +133,7 @@ export async function runRefreshPrices(
       continue;
     }
 
-    await prismaClient.dailyPrice.upsert({
-      where: {
-        productId_date: {
-          productId: p.id,
-          date: today,
-        },
-      },
-      create: {
-        productId: p.id,
-        date: today,
-        price: result.price,
-      },
-      update: { price: result.price },
-    });
+    await replaceDailyPriceForShanghaiDay(prismaClient, p.id, today, result.price);
     updated++;
   }
 

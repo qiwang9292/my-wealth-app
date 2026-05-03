@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { DatePickerField } from "@/components/DatePickerField";
 import { AddTransactionModal, type AddTransactionModalProduct } from "@/components/AddTransactionModal";
+import { groupProductsByAccount } from "@/lib/product-select-groups";
 
 type Tx = {
   id: string;
@@ -114,24 +115,7 @@ function TransactionsContent() {
     load();
   }, [productId, dateFrom, dateTo]);
 
-  const productGroups = useMemo(
-    () =>
-      Array.from(
-        products.reduce((m, p) => {
-          const acc = (p.account ?? "").trim() || "未分配账户";
-          const list = m.get(acc);
-          if (list) list.push(p);
-          else m.set(acc, [p]);
-          return m;
-        }, new Map<string, { id: string; name: string; account?: string | null }[]>())
-      )
-        .map(([account, list]) => ({
-          account,
-          rows: list.sort((a, b) => a.name.localeCompare(b.name, "zh-CN")),
-        }))
-        .sort((a, b) => a.account.localeCompare(b.account, "zh-CN")),
-    [products]
-  );
+  const productGroups = useMemo(() => groupProductsByAccount(products), [products]);
 
   const txGroups = useMemo(
     () =>
@@ -182,9 +166,9 @@ function TransactionsContent() {
             className="border border-slate-300 dark:border-slate-600 rounded px-2 py-1.5 bg-white dark:bg-slate-800 text-sm min-w-[160px]"
           >
             <option value="">全部</option>
-            {productGroups.map((g) => (
-              <optgroup key={g.account} label={g.account}>
-                {g.rows.map((p) => (
+            {productGroups.map(([account, rows]) => (
+              <optgroup key={account} label={account}>
+                {rows.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
                   </option>

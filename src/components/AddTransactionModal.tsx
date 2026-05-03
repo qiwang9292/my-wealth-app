@@ -3,31 +3,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { DatePickerField } from "@/components/DatePickerField";
 import { usesShareTimesNavForCategory } from "@/lib/categories";
-
-const TX_SELECT_UNSET_ACCOUNT = "（未填账户）";
-
-function groupProductsByAccountForTxSelect(
-  products: { id: string; name: string; code: string | null; account?: string | null }[]
-): [string, { id: string; name: string; code: string | null }[]][] {
-  const byAccount = new Map<string, { id: string; name: string; code: string | null }[]>();
-  for (const p of products) {
-    const label = (p.account ?? "").trim() || TX_SELECT_UNSET_ACCOUNT;
-    const list = byAccount.get(label);
-    const row = { id: p.id, name: p.name, code: p.code };
-    if (list) list.push(row);
-    else byAccount.set(label, [row]);
-  }
-  const entries = Array.from(byAccount.entries());
-  entries.sort(([a], [b]) => {
-    if (a === TX_SELECT_UNSET_ACCOUNT) return 1;
-    if (b === TX_SELECT_UNSET_ACCOUNT) return -1;
-    return a.localeCompare(b, "zh-Hans-CN");
-  });
-  for (const [, list] of entries) {
-    list.sort((x, y) => x.name.localeCompare(y.name, "zh-Hans-CN"));
-  }
-  return entries;
-}
+import { groupProductsByAccount } from "@/lib/product-select-groups";
 
 export type AddTransactionModalProduct = {
   id: string;
@@ -61,7 +37,7 @@ export function AddTransactionModal({
   onClose: () => void;
   onSaved: (info?: { mergedOpening?: boolean }) => void;
 }) {
-  const groupedProducts = useMemo(() => groupProductsByAccountForTxSelect(products), [products]);
+  const groupedProducts = useMemo(() => groupProductsByAccount(products), [products]);
   const [productId, setProductId] = useState("");
   const [type, setType] = useState<"BUY" | "SELL" | "DIVIDEND">("BUY");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
